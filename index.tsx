@@ -1165,6 +1165,10 @@ const App = () => {
           };
       } catch (e) {
           console.error("PAA Fetch Error:", e);
+          const err = e as Error;
+          if (err.message.includes('403') || err.message.includes('API key not valid')) {
+             setError(`Security Alert: API Key rejected during PAA Search. Please allow "https://${window.location.hostname}" in your Google Cloud API key restrictions.`);
+          }
           return { questions: [], source_urls: [] };
       }
   };
@@ -1310,7 +1314,14 @@ const App = () => {
                    const allEls = clone.querySelectorAll('*');
                    allEls.forEach(el => {
                        const attrs = el.getAttributeNames();
-                       attrs.forEach(attr => { if (attr.toLowerCase() !== 'href') el.removeAttribute(attr); });
+                       attrs.forEach(attr => { 
+                           if (attr.toLowerCase() !== 'href') el.removeAttribute(attr);
+                           // XSS Protection for Href
+                           if (attr.toLowerCase() === 'href') {
+                               const val = el.getAttribute('href') || '';
+                               if (val.trim().toLowerCase().startsWith('javascript:')) el.removeAttribute('href');
+                           }
+                       });
                    });
                    const rootAttrs = clone.getAttributeNames();
                    rootAttrs.forEach(attr => { if (attr.toLowerCase() !== 'href') clone.removeAttribute(attr); });
@@ -1594,7 +1605,12 @@ const App = () => {
       else if (!isIncremental) setActiveResultTab('outbound');
 
     } catch (e) {
-      setError(`An error occurred: ${(e as Error).message}.`);
+      const err = e as Error;
+      if (err.message.includes('403') || err.message.includes('API key not valid')) {
+          setError(`Security Alert: API Key rejected. If you restricted the key to this domain in Google Cloud, ensure "https://${window.location.hostname}" is allowed.`);
+      } else {
+          setError(`An error occurred: ${err.message}.`);
+      }
       setCurrentPhase('Failed.');
     } finally {
       setIsAnalysisRunning(false);

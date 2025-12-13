@@ -1,20 +1,31 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# NexusFlow AI
 
-# Run and deploy your AI Studio app
+An enterprise-grade internal link optimization tool powered by Google Gemini 2.5 Flash.
 
-This contains everything you need to run your app locally.
+## 🚀 How to Run Locally
 
-View your app in AI Studio: https://ai.studio/apps/drive/1brIBM4B9MfA0VlddPyPEvcaq9UwEUEho
+1.  **Install Node.js**: Ensure you have Node.js installed on your computer.
+2.  **Install Dependencies**:
+    ```bash
+    npm install
+    ```
+3.  **Set Environment Variable**:
+    Create a file named `.env` in the root directory and add your Google Gemini API Key:
+    ```
+    API_KEY=your_google_api_key_here
+    ```
+4.  **Start the App**:
+    ```bash
+    npm run dev
+    ```
 
-## Run Locally
+## ☁️ How to Deploy (Vercel/Netlify)
 
-**Prerequisites:**  Node.js
+1.  Push this folder to a **GitHub Repository**.
+2.  Connect the repository to **Vercel** or **Netlify**.
+3.  In the deployment settings, look for "Environment Variables".
+4.  Add a variable named `API_KEY` with your actual Google Gemini API key.
+5.  Deploy!
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## ⚠️ Note on Streamlit
+This is a **React Application**. It cannot be deployed to Streamlit Community Cloud (which supports Python). Use Vercel, Netlify, or GitHub Pages instead.
