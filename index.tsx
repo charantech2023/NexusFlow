@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from "@google/genai";
 
+// Fix for TypeScript build error: "Cannot find name 'process'"
+declare const process: any;
+
 // --- Types ---
 
 interface ParsedArticle {
@@ -2052,7 +2055,7 @@ const App = () => {
       
       <div className="navigation-buttons">
             <button className="btn btn-secondary" onClick={() => setStep(s => Math.max(1, s - 1))} disabled={step === 1 || isAnalysisRunning}>Back</button>
-            {step < 4 && <button className="btn btn-primary" onClick={() => setStep(s => Math.min(4, s + 1))} disabled={step === 1 ? !isMainArticleReady : step === 2 ? parsedArticles.length === 0 : false}>Next</button>}
+            {step < 4 && <button className="btn btn-primary" onClick={() => setStep(s => Math.min(4, s +1))} disabled={step === 1 ? !isMainArticleReady : step === 2 ? parsedArticles.length === 0 : false}>Next</button>}
       </div>
 
     </div>
