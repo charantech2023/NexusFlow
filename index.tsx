@@ -94,18 +94,14 @@ interface PaaData {
 
 // --- Constants ---
 
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36'
-];
-
 const PROXIES = [
     // 1. Corsproxy.io - Very reliable, transparent proxy
     (url: string) => ({ url: `https://corsproxy.io/?${encodeURIComponent(url)}`, headers: {} }),
     // 2. AllOrigins Raw - Returns raw content, bypassing CORS
     (url: string) => ({ url: `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, headers: {} }),
-    // 3. Fallback to direct fetch (only works for CORS-enabled sites)
+    // 3. ThingProxy - Fallback
+    (url: string) => ({ url: `https://thingproxy.freeboard.io/fetch/${url}`, headers: {} }),
+    // 4. Direct fetch (for permissive sites)
     (url: string) => ({ url, headers: {} }),
 ];
 
@@ -133,67 +129,41 @@ const EXCLUDED_URL_PATTERNS = [
 ];
 
 // --- Helper Functions ---
-const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
 const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
-    let lastError: Error | null = null;
-    const userAgent = getRandomUserAgent();
-    
-    // Config to prevent browser from sending cookies/referrer which triggers strict CORS
-    const fetchOptions: RequestInit = {
-        credentials: 'omit',
-        referrerPolicy: 'no-referrer',
-        mode: 'cors'
-    };
-    
-    // Mimic real browser headers to reduce bot profile
+    // Minimal headers to avoid triggering strict CORS preflight (Simple Request)
+    // Removed X-User-Agent as it causes 403s on many proxies
     const baseHeaders = {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'X-User-Agent': userAgent
+        'Accept-Language': 'en-US,en;q=0.9'
     };
 
     for (let i = 0; i < PROXIES.length; i++) {
         const proxyConfig = PROXIES[i](url);
         
-        // Attempt 1: With Custom Headers
         try {
             const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 20000); // 20s timeout
+            const id = setTimeout(() => controller.abort(), 15000); // 15s timeout
             
-            const headers = { ...baseHeaders, ...proxyConfig.headers };
-
             const response = await fetch(proxyConfig.url, { 
-                ...fetchOptions,
+                method: 'GET',
                 signal: controller.signal, 
-                headers: headers 
+                headers: baseHeaders 
             });
             clearTimeout(id);
-            if (response.ok) return response;
-        } catch (e) {
-            // Ignore failure on attempt 1
-        }
-
-        // Attempt 2: Simple Request (No Custom Headers) - Bypasses strict Preflight
-        try {
-            const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 20000);
             
-            const response = await fetch(proxyConfig.url, { 
-                ...fetchOptions,
-                signal: controller.signal 
-                // No headers property here
-            });
-            clearTimeout(id);
-            if (response.ok) return response;
-            lastError = new Error(`Proxy ${i} returned status ${response.status}`);
-        } catch (error) {
-            lastError = error as Error;
+            if (response.ok) {
+                // Verify content type to ensure we didn't get a proxy error page
+                const contentType = response.headers.get('content-type');
+                if (!contentType || contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/xml')) {
+                    return response;
+                }
+            }
+        } catch (e) {
+            // Proxy failed, try next
         }
     }
-    throw new Error(`All proxies failed. The site likely blocks external tools. Please use "Paste HTML" mode.`);
+    throw new Error(`Unable to fetch content due to site security settings. Please copy/paste the HTML manually using the "Paste HTML" option.`);
 };
 
 const normalizeUrl = (urlString: string): string => {
