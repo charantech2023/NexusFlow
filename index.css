@@ -213,6 +213,21 @@ body {
 .input:focus { outline: none; border-color: var(--primary-color); background: white; box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1); }
 textarea.input { min-height: 150px; font-family: monospace; resize: vertical; }
 
+/* Manual Paste Styling */
+.manual-paste-box {
+    background: #fff;
+    border: 2px dashed #f59e0b;
+    padding: 1.5rem;
+    border-radius: 8px;
+    background-color: #fffbeb;
+}
+textarea.manual-paste-area {
+    min-height: 200px;
+    font-family: monospace;
+    font-size: 0.85rem;
+    background: white;
+}
+
 .radio-group { 
     margin-bottom: 1.5rem; 
     background: #f8fafc;
@@ -494,14 +509,19 @@ textarea.input { min-height: 150px; font-family: monospace; resize: vertical; }
 }
 .progress-bar-sm { background: #f1f5f9; }
 
-/* Tooltips & Misc */
-.info-icon {
+/* New Card Design for Existing Links */
+.existing-link-card {
     background: white;
-    color: var(--secondary-color);
     border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    transition: transform 0.2s, box-shadow 0.2s;
+    box-shadow: var(--shadow-sm);
 }
-.info-tooltip {
-    background-color: #1e293b;
-    box-shadow: var(--shadow-lg);
-}
-.info-tooltip::after { border-color: #1e293b transparent transparent transparent; }
+.existing-link-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+
+.el-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; }
+.el-anchor { margin: 0; font-size: 1.1rem; color: #1e293b; font-weight: 700; }
+.el-target { display: block; font-family: monospace; font-size: 0.85rem; color: #64748b; text-decoration: none; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 500px; }
+.el-

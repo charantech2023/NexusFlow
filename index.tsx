@@ -95,14 +95,14 @@ interface PaaData {
 // --- Constants ---
 
 const PROXIES = [
-    // 1. Corsproxy.io - Very reliable, transparent proxy
-    (url: string) => ({ url: `https://corsproxy.io/?${encodeURIComponent(url)}`, headers: {} }),
-    // 2. AllOrigins Raw - Returns raw content, bypassing CORS
-    (url: string) => ({ url: `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, headers: {} }),
-    // 3. ThingProxy - Fallback
-    (url: string) => ({ url: `https://thingproxy.freeboard.io/fetch/${url}`, headers: {} }),
-    // 4. Direct fetch (for permissive sites)
-    (url: string) => ({ url, headers: {} }),
+    // 1. AllOrigins - Often most permissive for "Simple Requests"
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    // 2. Corsproxy.io - Reliable but sometimes strict on headers
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    // 3. CodeTabs - Good fallback
+    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    // 4. ThingProxy - Fallback
+    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
 ];
 
 const SAVED_ARTICLES_KEY = 'nexusflow_saved_articles'; // Renamed key
@@ -131,39 +131,40 @@ const EXCLUDED_URL_PATTERNS = [
 // --- Helper Functions ---
 
 const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
-    // Minimal headers to avoid triggering strict CORS preflight (Simple Request)
-    // Removed X-User-Agent as it causes 403s on many proxies
-    const baseHeaders = {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9'
-    };
-
+    // CRITICAL FIX: Do NOT send custom headers (like Accept, User-Agent, X-Requested-With).
+    // Sending custom headers triggers a CORS Preflight (OPTIONS) request.
+    // Most free proxies do not handle Preflight correctly or block it.
+    // By sending NO headers, we force a "Simple Request" which maximizes success.
+    
     for (let i = 0; i < PROXIES.length; i++) {
-        const proxyConfig = PROXIES[i](url);
+        const proxyUrl = PROXIES[i](url);
         
         try {
             const controller = new AbortController();
             const id = setTimeout(() => controller.abort(), 15000); // 15s timeout
             
-            const response = await fetch(proxyConfig.url, { 
+            const response = await fetch(proxyUrl, { 
                 method: 'GET',
-                signal: controller.signal, 
-                headers: baseHeaders 
+                signal: controller.signal,
+                // explicit undefined to prevent browser from adding anything unexpected if it can
+                headers: undefined 
             });
             clearTimeout(id);
             
             if (response.ok) {
-                // Verify content type to ensure we didn't get a proxy error page
+                // Verify content type to ensure we didn't get a proxy error page masquerading as 200
                 const contentType = response.headers.get('content-type');
+                // Allow if it looks like html/json/xml or if content-type is missing (rare but possible)
                 if (!contentType || contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/xml')) {
                     return response;
                 }
             }
         } catch (e) {
             // Proxy failed, try next
+            console.warn(`Proxy ${i} failed for ${url}`, e);
         }
     }
-    throw new Error(`Unable to fetch content due to site security settings. Please copy/paste the HTML manually using the "Paste HTML" option.`);
+    throw new Error(`Unable to fetch content. This site may be blocking external access. Please use the "Paste HTML" option instead.`);
 };
 
 const normalizeUrl = (urlString: string): string => {
@@ -1057,8 +1058,12 @@ const App = () => {
               const res = await fetchWithProxyFallbacks(suggestion.source_page_url);
               htmlContent = await res.text();
           } catch (fetchError) {
-              setManualPasteIndex(index);
-              setManualPasteContent('');
+              // CHANGED: No longer auto-open manual paste. Just show error.
+              updatedSuggestions[index] = { 
+                  ...updatedSuggestions[index], 
+                  placementError: "Could not retrieve page content automatically. Please use Manual Paste." 
+              };
+              setInboundSuggestions(updatedSuggestions);
               setAnalyzingPlacementId(null);
               return; 
           }
@@ -1067,6 +1072,7 @@ const App = () => {
           updatedSuggestions[index] = { ...updatedSuggestions[index], placement: result };
           setInboundSuggestions(updatedSuggestions);
       } catch (e) {
+          // If we have content but AI failed or other issue, allow fallback too
           updatedSuggestions[index] = { ...updatedSuggestions[index], placementError: (e as Error).message };
           setInboundSuggestions(updatedSuggestions);
       } finally {
@@ -1530,6 +1536,55 @@ const App = () => {
 
           // ... (Inbound Logic - Preserved)
 
+          // INBOUND LOGIC START (For reference, preserving logic but ensuring vars are available)
+          if (configToRun.inbound) {
+              setCurrentPhase('Finding inbound link opportunities...');
+              // Simple simulation of finding relevant inbound candidates based on keyword matching
+              // In a real app, this would be a vector search. Here we use string matching on title/keywords.
+              const topicKeywords = analysisResult.key_entities.concat(analysisResult.primary_topic.split(' ')).map(k => k.toLowerCase());
+              
+              const relevantInbound = suitableCandidates.filter(c => {
+                  const combinedText = (c.title + ' ' + (c.keyword || '')).toLowerCase();
+                  return topicKeywords.some(k => combinedText.includes(k));
+              }).slice(0, 15); // Limit to top 15 potential sources
+
+              if (relevantInbound.length > 0) {
+                  const inboundPrompt = `You are an SEO Strategist.
+                  Target Page (The page we want links TO): "${analysisResult.primary_topic}"
+                  Intent: ${analysisResult.user_intent}
+                  
+                  Potential Source Pages (Pages that could link TO the target):
+                  ${JSON.stringify(relevantInbound.map(p => ({ title: p.title, url: p.url })))}
+                  
+                  Task: Identify the top 5 most relevant pages that should link to the Target Page.
+                  For each, suggest a natural anchor text and explain why (context).
+                  Return JSON.`;
+
+                  const inboundResponse = await ai.models.generateContent({
+                      model: 'gemini-2.5-flash',
+                      contents: inboundPrompt,
+                      config: {
+                          responseMimeType: "application/json",
+                          responseSchema: {
+                              type: Type.OBJECT, properties: {
+                                  suggestions: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: {
+                                      source_page_title: { type: Type.STRING },
+                                      source_page_url: { type: Type.STRING },
+                                      relevance_score: { type: Type.INTEGER },
+                                      reasoning: { type: Type.STRING },
+                                      suggested_anchor_text: { type: Type.STRING },
+                                      relationship_type: { type: Type.STRING },
+                                  }}}
+                              }
+                          }
+                      }
+                  });
+                  const inboundJson = extractJson(inboundResponse.text);
+                  setInboundSuggestions(inboundJson.suggestions || []);
+              }
+          }
+          // INBOUND LOGIC END
+
           if (configToRun.outbound) {
             setCurrentPhase(`Architecting outbound links...`);
             const BATCH_SIZE = 20; 
@@ -1549,12 +1604,18 @@ const App = () => {
              // Density Stats
              const plainText = cleanArticleHtml.replace(/<[^>]+>/g, ' ');
              const wordCount = plainText.split(/\s+/).filter(w => w.length > 0).length;
-             const recommendedTotal = Math.max(3, Math.ceil(wordCount / 200));
-             const slotsAvailable = Math.max(0, recommendedTotal - internalLinksCount);
-             let dynamicLimit = Math.max(3, Math.min(slotsAvailable, 12));
-             if (readability.score < 30) dynamicLimit = Math.max(3, Math.floor(dynamicLimit * 0.3)); 
-             else if (readability.score < 50) dynamicLimit = Math.max(3, Math.floor(dynamicLimit * 0.5));
-             else if (readability.score < 60) dynamicLimit = Math.max(4, Math.floor(dynamicLimit * 0.8));
+             // CHANGED LOGIC: More generous limits
+             // Was: Math.max(3, Math.ceil(wordCount / 200))
+             // Now: Math.max(5, Math.ceil(wordCount / 120))
+             const recommendedTotal = Math.max(5, Math.ceil(wordCount / 120));
+             
+             // Relaxed slot calculation
+             const slotsAvailable = Math.max(0, recommendedTotal - (internalLinksCount * 0.5)); // Only count existing links as half-weight to encourage new ones
+             
+             // Cap at 20, min 5
+             let dynamicLimit = Math.max(5, Math.min(Math.ceil(slotsAvailable), 20));
+
+             if (readability.score < 30) dynamicLimit = Math.max(3, Math.floor(dynamicLimit * 0.5)); 
 
              setDensityStats({
                 wordCount,
@@ -1920,82 +1981,208 @@ const App = () => {
                             ))}
                         </div>
                         
+                        {/* INBOUND TAB - UPDATED LOGIC */}
+                        {activeResultTab === 'inbound' && lastRunConfig?.inbound && (
+                            <div className="tab-content">
+                                {inboundSuggestions.length === 0 ? (
+                                    <div className="empty-state">
+                                        <div className="empty-icon">🔍</div>
+                                        <h3>No Backlink Opportunities</h3>
+                                        <p>We checked your inventory but didn't find high-relevance pages to link back to this content.</p>
+                                    </div>
+                                ) : (
+                                    inboundSuggestions.map((suggestion, index) => (
+                                        <div key={index} className="suggestion-item">
+                                            <div className="suggestion-header">
+                                                <h3>From: {suggestion.source_page_title}</h3>
+                                                <span className="badge new">Backlink Opportunity</span>
+                                            </div>
+                                            <div className="suggestion-details">
+                                                <p style={{marginBottom: '0.5rem'}}><strong>Source URL:</strong> <a href={suggestion.source_page_url} target="_blank" style={{color: 'var(--primary-color)'}}>{suggestion.source_page_url}</a></p>
+                                                <p style={{marginBottom: '1rem'}}><strong>Why:</strong> {suggestion.reasoning}</p>
+                                                <div style={{background: '#f8fafc', padding: '1rem', borderRadius: '8px', borderLeft: '4px solid #f59e0b'}}>
+                                                    <strong>Suggested Anchor:</strong> "{suggestion.suggested_anchor_text}"
+                                                </div>
+                                            </div>
+                                            
+                                            {/* Placement Logic */}
+                                            {suggestion.placement ? (
+                                                <div style={{marginTop: '1.5rem', borderTop: '1px solid #e2e8f0', paddingTop: '1rem'}}>
+                                                    <h4 style={{marginTop:0}}>Suggested Placement</h4>
+                                                    <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem'}}>
+                                                        <div>
+                                                            <div className="sd-label">Original Paragraph</div>
+                                                            <div className="suggestion-context" dangerouslySetInnerHTML={{__html: suggestion.placement.original_paragraph}} />
+                                                        </div>
+                                                        <div>
+                                                            <div className="sd-label" style={{color: 'var(--success-color)'}}>With Link</div>
+                                                            <div className="suggestion-context" style={{borderLeftColor: 'var(--success-color)'}} dangerouslySetInnerHTML={{__html: suggestion.placement.new_paragraph_html}} />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div style={{marginTop: '1.5rem', borderTop: '1px solid #e2e8f0', paddingTop: '1rem'}}>
+                                                    {/* Manual Paste Mode */}
+                                                    {manualPasteIndex === index ? (
+                                                        <div className="manual-paste-box">
+                                                            <p className="status-message warning" style={{marginTop: 0, marginBottom: '1rem'}}>
+                                                                <strong>Connection Failed:</strong> We couldn't fetch this page automatically (often due to security settings). 
+                                                                Please open <a href={suggestion.source_page_url} target="_blank">{suggestion.source_page_url}</a>, copy the full page HTML (Ctrl+U, Ctrl+A, Ctrl+C), and paste it below.
+                                                            </p>
+                                                            <textarea 
+                                                                className="input manual-paste-area" 
+                                                                placeholder="Paste <html>...</html> content here"
+                                                                value={manualPasteContent}
+                                                                onChange={e => setManualPasteContent(e.target.value)}
+                                                            />
+                                                            <div style={{marginTop: '1rem', display: 'flex', gap: '1rem'}}>
+                                                                <button className="btn btn-primary btn-sm" onClick={() => handleManualPlacementAnalysis(index)} disabled={!manualPasteContent || analyzingPlacementId === index}>
+                                                                    {analyzingPlacementId === index ? <span className="spinner" style={{width: '12px', height: '12px', borderTopColor: 'white'}}></span> : 'Analyze Manual Content'}
+                                                                </button>
+                                                                <button className="btn btn-secondary btn-sm" onClick={() => { setManualPasteIndex(null); setManualPasteContent(''); }}>Cancel</button>
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        /* Error or Initial State */
+                                                        <div className="inbound-actions">
+                                                            {suggestion.placementError && (
+                                                                <div className="status-message error" style={{marginBottom: '1rem', marginTop: 0}}>
+                                                                    <span>⚠️ {suggestion.placementError}</span>
+                                                                </div>
+                                                            )}
+                                                            
+                                                            <div style={{display: 'flex', gap: '1rem', alignItems: 'center'}}>
+                                                                <button 
+                                                                    className="btn btn-primary btn-sm" 
+                                                                    onClick={() => handleFindInboundPlacement(index)}
+                                                                    disabled={analyzingPlacementId !== null}
+                                                                >
+                                                                    {analyzingPlacementId === index ? 'Scanning Page...' : (suggestion.placementError ? 'Retry Scan' : 'Find Exact Placement')}
+                                                                </button>
+                                                                
+                                                                <button 
+                                                                    className="btn btn-secondary btn-sm" 
+                                                                    onClick={() => setManualPasteIndex(index)}
+                                                                    disabled={analyzingPlacementId !== null}
+                                                                >
+                                                                    Manual Paste
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
+
                         {/* Tab Content Implementation ... (Similar structure to before but styled) */}
                         {activeResultTab === 'existing' && lastRunConfig?.existing && (
                             <div className="tab-content">
-                                <div className="existing-links-container">
-                                    {filteredExistingLinks.map((link, idx) => (
-                                        <div key={idx} className="existing-link-item">
-                                            <div className="existing-link-header">
-                                                <h3 className="existing-link-anchor" style={{margin: 0}}>{link.anchor_text}</h3>
-                                                <span className={`score-badge score-${getScoreCategory(link.score)}`}>{link.score}</span>
-                                            </div>
-                                            <div className="existing-link-details">
-                                                <p style={{fontSize: '0.9rem', color: '#64748b'}}>Target: {link.target_url}</p>
-                                                <div className="analysis-box">
-                                                     <p style={{margin: 0}}>{link.reasoning}</p>
-                                                     {link.improvement_suggestion && <p className="improvement-suggestion" style={{marginTop: '0.5rem', color: '#0f172a', fontWeight: 500}}>💡 {link.improvement_suggestion}</p>}
+                                {filteredExistingLinks.length === 0 ? (
+                                    <div className="empty-state">
+                                        <div className="empty-icon">✅</div>
+                                        <h3>No Issues Found</h3>
+                                        <p>All existing internal links appear to be optimized based on current criteria.</p>
+                                    </div>
+                                ) : (
+                                    <div className="existing-links-container">
+                                        {filteredExistingLinks.map((link, idx) => (
+                                            <div key={idx} className={`existing-link-card score-${getScoreCategory(link.score)}`}>
+                                                <div className="el-header">
+                                                    <div>
+                                                        <h4 className="el-anchor">"{link.anchor_text}"</h4>
+                                                        <a href={link.target_url} target="_blank" className="el-target" rel="noopener noreferrer">
+                                                            {link.target_url}
+                                                        </a>
+                                                    </div>
+                                                    <div className={`el-score score-${getScoreCategory(link.score)}`}>
+                                                        <span className="score-val">{link.score}</span>
+                                                        <span className="score-label">/100</span>
+                                                    </div>
+                                                </div>
+                                                <div className="el-body">
+                                                    <p className="el-reasoning">{link.reasoning}</p>
+                                                    {link.improvement_suggestion && (
+                                                        <div className="el-suggestion">
+                                                            <span className="bulb">💡</span>
+                                                            <span>{link.improvement_suggestion}</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
-                                        </div>
-                                    ))}
-                                </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         )}
 
                         {activeResultTab === 'outbound' && lastRunConfig?.outbound && (
                             <div className="tab-content">
-                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom: '1rem'}}>
-                                    <div style={{flex: 1}}>
-                                        {paaData && (
-                                            <div style={{background: '#eff6ff', border: '1px solid #bfdbfe', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem'}}>
-                                                <h3 style={{margin: '0 0 0.5rem 0', fontSize: '1rem', color: '#1e40af'}}>Google Search Intelligence</h3>
-                                                <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem'}}>
-                                                    {paaData.questions.slice(0, 4).map((q, i) => (
-                                                        <span key={i} style={{background: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '0.8rem', color: '#1e3a8a'}}>❓ {q}</span>
-                                                    ))}
+                                {suggestions.length === 0 ? (
+                                    <div className="empty-state">
+                                        <div className="empty-icon">🔍</div>
+                                        <h3>No Suggestions Found</h3>
+                                        <p>NexusFlow didn't find any high-confidence link opportunities for the current content and strategy settings.</p>
+                                        <button className="btn btn-secondary btn-sm" style={{marginTop: '1rem'}} onClick={() => setStep(3)}>Adjust Strategy</button>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom: '1rem'}}>
+                                            <div style={{flex: 1}}>
+                                                {paaData && (
+                                                    <div style={{background: '#eff6ff', border: '1px solid #bfdbfe', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem'}}>
+                                                        <h3 style={{margin: '0 0 0.5rem 0', fontSize: '1rem', color: '#1e40af'}}>Google Search Intelligence</h3>
+                                                        <div style={{display: 'flex', flexWrap: 'wrap', gap: '0.5rem'}}>
+                                                            {paaData.questions.slice(0, 4).map((q, i) => (
+                                                                <span key={i} style={{background: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '0.8rem', color: '#1e3a8a'}}>❓ {q}</span>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div style={{marginLeft: '2rem'}}>
+                                                {suggestions.length > 0 && <AnchorProfile suggestions={suggestions} />}
+                                            </div>
+                                        </div>
+
+                                        {suggestions.map((suggestion, index) => (
+                                            <div key={index} className={`suggestion-item ${suggestionStatus[index] || ''}`}>
+                                                <div className="suggestion-header">
+                                                    <h3>{suggestion.anchor_text}</h3>
+                                                    <div className="badge-group">
+                                                        {suggestion.is_paa_match && <span className="badge" style={{background: 'linear-gradient(90deg, #ec4899 0%, #d946ef 100%)'}}>🔥 Google Verified</span>}
+                                                        {suggestion.isMoneyPage && <span className="badge badge-money">💰 Money Page</span>}
+                                                        {suggestion.isStrategicPage && <span className="badge" style={{backgroundColor: '#06b6d4'}}>⚡ Strategic</span>}
+                                                        <span className={`badge ${suggestion.suggestion_type.toLowerCase()}`}>{suggestion.suggestion_type}</span>
+                                                        <span className="badge badge-type">{suggestion.strategy_tag}</span>
+                                                    </div>
+                                                </div>
+                                                <div className="suggestion-details">
+                                                    <p style={{marginBottom: '0.5rem'}}><strong>Target:</strong> <a href={suggestion.target_url} target="_blank" style={{color: 'var(--primary-color)'}}>{suggestion.target_url}</a></p>
+                                                    <p style={{marginBottom: '1rem'}}><strong>Why:</strong> {suggestion.reasoning}</p>
+                                                    <div className="suggestion-context" dangerouslySetInnerHTML={{__html: suggestion.paragraph_with_link}} />
+                                                </div>
+                                                {refiningIndex === index && (
+                                                    <div className="refinement-box">
+                                                        <h4 style={{marginTop:0}}>Refine Anchor</h4>
+                                                        {isRefining ? <div>AI is writing...</div> : (
+                                                            <ul className="refinement-list">{refinementSuggestions.map((opt, i) => (<li key={i} onClick={() => applyRefinement(index, opt)}>{opt}</li>))}</ul>
+                                                        )}
+                                                        <button className="btn-sm btn-secondary" onClick={() => setRefiningIndex(null)}>Cancel</button>
+                                                    </div>
+                                                )}
+                                                <div className="suggestion-actions">
+                                                    <button className="btn btn-sm btn-accept" onClick={() => handleAcceptSuggestion(index)} disabled={!!suggestionStatus[index]}>{suggestionStatus[index] === 'accepted' ? 'Accepted' : 'Accept'}</button>
+                                                    <button className="btn btn-sm btn-secondary" onClick={() => handleRefine(index)} disabled={!!suggestionStatus[index]}>Refine</button>
+                                                    <button className="btn btn-sm btn-reject" onClick={() => handleRejectSuggestion(index)} disabled={!!suggestionStatus[index]}>Reject</button>
                                                 </div>
                                             </div>
-                                        )}
-                                    </div>
-                                    <div style={{marginLeft: '2rem'}}>
-                                        {suggestions.length > 0 && <AnchorProfile suggestions={suggestions} />}
-                                    </div>
-                                </div>
-
-                                {suggestions.map((suggestion, index) => (
-                                    <div key={index} className={`suggestion-item ${suggestionStatus[index] || ''}`}>
-                                        <div className="suggestion-header">
-                                            <h3>{suggestion.anchor_text}</h3>
-                                            <div className="badge-group">
-                                                {suggestion.is_paa_match && <span className="badge" style={{background: 'linear-gradient(90deg, #ec4899 0%, #d946ef 100%)'}}>🔥 Google Verified</span>}
-                                                {suggestion.isMoneyPage && <span className="badge badge-money">💰 Money Page</span>}
-                                                {suggestion.isStrategicPage && <span className="badge" style={{backgroundColor: '#06b6d4'}}>⚡ Strategic</span>}
-                                                <span className={`badge ${suggestion.suggestion_type.toLowerCase()}`}>{suggestion.suggestion_type}</span>
-                                                <span className="badge badge-type">{suggestion.strategy_tag}</span>
-                                            </div>
-                                        </div>
-                                        <div className="suggestion-details">
-                                            <p style={{marginBottom: '0.5rem'}}><strong>Target:</strong> <a href={suggestion.target_url} target="_blank" style={{color: 'var(--primary-color)'}}>{suggestion.target_url}</a></p>
-                                            <p style={{marginBottom: '1rem'}}><strong>Why:</strong> {suggestion.reasoning}</p>
-                                            <div className="suggestion-context" dangerouslySetInnerHTML={{__html: suggestion.paragraph_with_link}} />
-                                        </div>
-                                        {refiningIndex === index && (
-                                            <div className="refinement-box">
-                                                <h4 style={{marginTop:0}}>Refine Anchor</h4>
-                                                {isRefining ? <div>AI is writing...</div> : (
-                                                    <ul className="refinement-list">{refinementSuggestions.map((opt, i) => (<li key={i} onClick={() => applyRefinement(index, opt)}>{opt}</li>))}</ul>
-                                                )}
-                                                <button className="btn-sm btn-secondary" onClick={() => setRefiningIndex(null)}>Cancel</button>
-                                            </div>
-                                        )}
-                                        <div className="suggestion-actions">
-                                            <button className="btn btn-sm btn-accept" onClick={() => handleAcceptSuggestion(index)} disabled={!!suggestionStatus[index]}>{suggestionStatus[index] === 'accepted' ? 'Accepted' : 'Accept'}</button>
-                                            <button className="btn btn-sm btn-secondary" onClick={() => handleRefine(index)} disabled={!!suggestionStatus[index]}>Refine</button>
-                                            <button className="btn btn-sm btn-reject" onClick={() => handleRejectSuggestion(index)} disabled={!!suggestionStatus[index]}>Reject</button>
-                                        </div>
-                                    </div>
-                                ))}
+                                        ))}
+                                    </>
+                                )}
                             </div>
                         )}
 
