@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from "@google/genai";
+import { injectSpeedInsights } from '@vercel/speed-insights';
 
 // Fix for TypeScript build error: "Cannot find name 'process'"
 declare const process: any;
@@ -2221,3 +2222,6 @@ const App = () => {
 
 const root = createRoot(document.getElementById('root')!);
 root.render(<App />);
+
+// Initialize Vercel Speed Insights
+injectSpeedInsights();
