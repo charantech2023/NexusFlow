@@ -43,6 +43,22 @@ body { font-family: 'Inter', sans-serif; background-color: var(--bg-color); colo
 .input:focus { border-color: var(--primary-color); outline: none; }
 textarea.input { min-height: 200px; font-family: 'Inter', sans-serif; }
 
+.csv-upload-box {
+    border: 2px dashed var(--border-color);
+    padding: 1.5rem;
+    border-radius: 10px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: #f8fafc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 85px;
+}
+.csv-upload-box:hover { border-color: var(--primary-color); background: #f5f3ff; }
+.csv-upload-box span { font-weight: 600; font-size: 0.85rem; color: var(--secondary-color); }
+
 .btn { padding: 0.8rem 1.5rem; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
 .btn-primary { background: var(--primary-color); color: white; }
 .btn-primary:hover { background: var(--primary-hover); }
@@ -65,7 +81,6 @@ textarea.input { min-height: 200px; font-family: 'Inter', sans-serif; }
 
 .review-box { padding: 1.5rem; background: #fafafa; border-radius: 10px; border-left: 5px solid #ddd; }
 .badge { padding: 5px 10px; border-radius: 6px; font-size: 0.65rem; font-weight: 800; text-transform: uppercase; color: white; display: inline-block; }
-.badge.new { background: var(--success-color); }
 .badge.badge-money { background: #8b5cf6; }
 .badge.badge-pillar { background: #06b6d4; }
 
