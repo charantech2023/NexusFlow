@@ -22,7 +22,7 @@ interface ParsedArticle {
 interface AnalysisResult {
     primary_topic: string;
     user_intent: string;
-    content_stage: string; 
+    content_stage: 'Awareness' | 'Consideration' | 'Decision'; 
     key_entities: string[];
 }
 
@@ -70,15 +70,23 @@ interface GroundingChunk {
 
 const PROXIES = [
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
 ];
 
 const SAVED_ARTICLES_KEY = 'nexusflow_saved_articles';
 const DEFAULT_MONEY_PATTERNS = ['/product/', '/service/', '/pricing/', '/demo/', '/buy/', '/order/'];
 const DEFAULT_PILLAR_PATTERNS = ['/guide/', '/pillar/', '/hub/', '/resource/', '/ultimate-guide/'];
 
-const NAV_SELECTORS = 'script, style, svg, iframe, nav, footer, header, aside, noscript, .ad-container, .menu, .nav, .sidebar, .breadcrumbs, .breadcrumb, .pagination, .site-header, .site-footer, #sidebar, #menu, #nav, .widget-area, .entry-meta, .post-meta, .cat-links, .tags-links, .metadata, .post-info, .author-box, .comment-respond';
+// Expanded noise removal selectors
+const NAV_SELECTORS = [
+    'script', 'style', 'svg', 'iframe', 'nav', 'footer', 'header', 'aside', 'noscript',
+    '.ad-container', '.menu', '.nav', '.sidebar', '.breadcrumbs', '.breadcrumb', 
+    '.pagination', '.site-header', '.site-footer', '#sidebar', '#menu', '#nav', 
+    '.widget-area', '.entry-meta', '.post-meta', '.cat-links', '.tags-links', 
+    '.metadata', '.post-info', '.author-box', '.comment-respond', '.social-share',
+    '.related-posts', '.newsletter-signup', '.disclaimer', '.cookie-banner'
+].join(', ');
 
 const EXCLUDED_URL_PATTERNS = [
     '/author/', '/category/', '/tag/', '/search/', '/login', '/signup', '/register', 
@@ -89,17 +97,30 @@ const EXCLUDED_URL_PATTERNS = [
 // --- Helper Functions ---
 
 const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
+    let lastError = null;
     for (let i = 0; i < PROXIES.length; i++) {
         const proxyUrl = PROXIES[i](url);
         try {
             const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 12000);
-            const response = await fetch(proxyUrl, { method: 'GET', signal: controller.signal });
+            const id = setTimeout(() => controller.abort(), 15000); 
+            const response = await fetch(proxyUrl, { 
+                method: 'GET', 
+                signal: controller.signal,
+                headers: { 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9' }
+            });
             clearTimeout(id);
             if (response.ok) return response;
-        } catch (e) { console.warn(`Proxy ${i} failed for ${url}`); }
+        } catch (e) { 
+            lastError = e;
+        }
     }
-    throw new Error(`Unable to fetch. Please check your URL.`);
+    throw new Error(lastError ? `Fetch failed. Target site might be blocking access. Try pasting manually.` : "Fetch failed.");
+};
+
+const getHostname = (urlString: string): string => {
+  try {
+    return new URL(urlString).hostname.replace('www.', '');
+  } catch (e) { return ''; }
 };
 
 const normalizeUrl = (urlString: string): string => {
@@ -125,35 +146,78 @@ const extractJson = (text: string) => {
     return JSON.parse(jsonText.substring(startIndex, endIndex + 1));
 };
 
+/**
+ * Clean HTML and convert to structured Markdown for AI analysis.
+ * Preserves H1, H2, H3 and Main Body while removing noise.
+ */
 const toCompactContent = (html: string) => {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = html;
+    
+    // Strict Noise Removal
     tempDiv.querySelectorAll(NAV_SELECTORS).forEach(el => el.remove());
-    let text = "";
+    
+    let markdown = "";
     const walkers = document.createTreeWalker(tempDiv, NodeFilter.SHOW_ELEMENT);
     let node;
     while(node = walkers.nextNode()) {
         const el = node as HTMLElement;
-        if(['H1', 'H2', 'H3'].includes(el.tagName)) text += `\n# ${el.innerText}\n`;
-        else if(el.tagName === 'P' && el.innerText.length > 20) text += `${el.innerText}\n\n`;
+        const tagName = el.tagName;
+        const text = el.innerText.trim();
+        
+        if (!text) continue;
+
+        if (tagName === 'H1') markdown += `\n# ${text}\n`;
+        else if (tagName === 'H2') markdown += `\n## ${text}\n`;
+        else if (tagName === 'H3') markdown += `\n### ${text}\n`;
+        else if (tagName === 'P' && text.length > 20) {
+            // Only add paragraphs that look like actual body content
+            markdown += `${text}\n\n`;
+        } else if ((tagName === 'LI') && text.length > 5) {
+            markdown += `- ${text}\n`;
+        }
     }
-    return text.substring(0, 15000);
+    
+    return markdown.substring(0, 15000);
 };
 
-const extractExistingLinks = (html: string) => {
+const extractExistingLinks = (html: string, baseDomain: string, inventory: ParsedArticle[]) => {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = html;
     tempDiv.querySelectorAll(NAV_SELECTORS).forEach(el => el.remove());
     const links: { anchor: string; url: string }[] = [];
+    const inventoryPaths = new Set(inventory.map(p => normalizeUrl(p.url)));
+
     tempDiv.querySelectorAll('a').forEach(a => {
         const href = a.getAttribute('href');
         const text = a.innerText.trim();
-        if (href && text && (href.startsWith('http') || href.startsWith('/'))) {
-            const isExcluded = EXCLUDED_URL_PATTERNS.some(p => href.toLowerCase().includes(p.toLowerCase()));
-            if (!isExcluded) links.push({ anchor: text, url: href });
+        if (href && text) {
+            try {
+                // Determine if link is internal
+                let isInternal = false;
+                if (href.startsWith('/') || href.startsWith('#')) {
+                    isInternal = true;
+                } else {
+                    const urlObj = new URL(href, baseDomain ? `https://${baseDomain}` : window.location.origin);
+                    const currentHostname = urlObj.hostname.replace('www.', '');
+                    if (baseDomain && currentHostname === baseDomain) {
+                        isInternal = true;
+                    }
+                }
+
+                // Double check against inventory paths
+                const path = normalizeUrl(href);
+                if (inventoryPaths.has(path)) isInternal = true;
+
+                const isExcluded = EXCLUDED_URL_PATTERNS.some(p => href.toLowerCase().includes(p.toLowerCase()));
+                
+                if (isInternal && !isExcluded) {
+                    links.push({ anchor: text, url: href });
+                }
+            } catch (e) { /* invalid url */ }
         }
     });
-    return links.slice(0, 30);
+    return links.slice(0, 50);
 };
 
 // --- Main App ---
@@ -228,11 +292,13 @@ const App = () => {
   const handleFetchArticle = async () => {
     if (!mainArticleUrl) return;
     setIsProcessingMain(true);
-    setMainArticleStatus({ message: 'Fetching...', type: 'info' });
+    setMainArticleStatus({ message: 'Initializing secure fetch...', type: 'info' });
     try {
       const response = await fetchWithProxyFallbacks(mainArticleUrl);
-      setMainArticleHtml(await response.text());
-      setMainArticleStatus({ message: 'Success!', type: 'success' });
+      const html = await response.text();
+      if (!html || html.length < 200) throw new Error("Fetched content is too short. Try pasting the content instead.");
+      setMainArticleHtml(html);
+      setMainArticleStatus({ message: 'Draft fetched successfully!', type: 'success' });
     } catch (e) {
       setMainArticleStatus({ message: (e as Error).message, type: 'error' });
     } finally { setIsProcessingMain(false); }
@@ -240,25 +306,40 @@ const App = () => {
 
   const runFastAnalysis = async () => {
     setIsAnalysisRunning(true);
-    setCurrentPhase('Initializing Analysis...');
+    setCurrentPhase('Initializing Analysis Engine...');
     
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const rawContent = mainArticleInputMode === 'fetch' ? mainArticleHtml : mainArticle;
     const compactContent = toCompactContent(rawContent);
-    const existingLinks = extractExistingLinks(rawContent);
-    const existingUrls = existingLinks.map(l => normalizeUrl(l.url));
+    const baseDomain = getHostname(mainArticleUrl);
+    
+    // Internal Links Audit
+    const existingInternalLinks = extractExistingLinks(rawContent, baseDomain, parsedArticles);
+    const existingInternalUrls = existingInternalLinks.map(l => normalizeUrl(l.url));
+    
     const targetOutboundCount = Math.min(15, Math.max(3, Math.ceil(compactContent.split(/\s+/).length / 250)));
 
     try {
-        setCurrentPhase('Identifying People Also Ask questions...');
+        setCurrentPhase('Classifying Content Stage & Entities...');
         const [classTask, paaTask] = await Promise.all([
           ai.models.generateContent({
-              model: 'gemini-2.5-flash',
-              contents: `Analyze Content Role:\n${compactContent.substring(0, 5000)}\nReturn JSON: { "primary_topic", "user_intent", "content_stage": "Awareness|Consideration|Decision", "key_entities": [] }`,
+              model: 'gemini-3-flash-preview',
+              contents: `Analyze Content Role and Entities:
+              ${compactContent}
+              
+              Task:
+              1. Classify the Content Stage strictly as:
+                 - Awareness (General info/Problem discovery)
+                 - Consideration (Solution comparison/Guides)
+                 - Decision (Product pages/Pricing/Demo)
+              2. Extract Top 3 Key Entities or Products.
+              3. Identify User Intent.
+              
+              Return JSON: { "primary_topic", "user_intent", "content_stage", "key_entities": [] }`,
               config: { responseMimeType: 'application/json' }
           }),
           ai.models.generateContent({
-              model: 'gemini-2.5-flash',
+              model: 'gemini-3-flash-preview',
               contents: `Search for top 5 'People Also Ask' questions related to: "${compactContent.substring(0, 500)}".`,
               config: { tools: [{googleSearch: {}}] }
           })
@@ -271,33 +352,48 @@ const App = () => {
         setGroundingLinks(groundingChunks.filter(c => c.web).map(c => ({ title: c.web!.title, uri: c.web!.uri })));
         const paaQuestionsText = paaTask.text;
 
-        setCurrentPhase(`Architecting Link Journeys...`);
-        const searchPool = parsedArticles.slice(0, 50).map(p => ({ 
+        setCurrentPhase(`Analyzing Internal Inventory (${parsedArticles.length} pages)...`);
+        
+        // Dynamic Sampling for Inbound/Outbound
+        const sampledInventory = parsedArticles.slice(0, 200).map(p => ({ 
             url: p.url, title: p.title, 
             type: moneyPatterns.some(m => p.url.includes(m)) ? 'MONEY_PAGE' : pillarPatterns.some(pp => p.url.includes(pp)) ? 'STRATEGIC_PILLAR' : 'CONTENT' 
         }));
 
         const [outboundTask, inboundTask, auditTask] = await Promise.allSettled([
             ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `Context: Internal Linking Architecture.
-                Topic: ${analysis.primary_topic} | PAA Context: ${paaQuestionsText}
-                Existing Linked URLs: ${JSON.stringify(existingUrls)}
-                Task: Find ${targetOutboundCount} NEW logical link placements.
-                Inventory: ${JSON.stringify(searchPool)}
-                Rules: Use "Bridge" anchors. If matching a PAA question, cite it.
+                model: 'gemini-3-flash-preview',
+                contents: `INTERNAL LINKING ARCHITECTURE.
+                Primary Topic: ${analysis.primary_topic}
+                PAA Context: ${paaQuestionsText}
+                Draft Content: ${compactContent}
+                Existing Internal Links (URLs): ${JSON.stringify(existingInternalUrls)}
+                
+                Task: Suggest ${targetOutboundCount} NEW internal links from this draft to the provided inventory.
+                Inventory Pool: ${JSON.stringify(sampledInventory.slice(0, 50))}
+                
+                Rules: Use descriptive "Bridge" anchors. If matching a PAA question, cite it.
                 Return JSON: { "suggestions": [{ "anchor_text", "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "strategy_tag", "is_paa_match", "matched_paa_question" }] }`,
                 config: { responseMimeType: 'application/json' }
             }),
             ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `Inventory: ${JSON.stringify(parsedArticles.slice(0, 40).map(p => ({ title: p.title, url: p.url })))}
-                Return JSON of 5 inbound link ideas to: "${analysis.primary_topic}". { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
+                model: 'gemini-3-flash-preview',
+                contents: `INBOUND LINK DISCOVERY.
+                Find 5 pages in this inventory that should link TO our current topic: "${analysis.primary_topic}".
+                Inventory: ${JSON.stringify(sampledInventory.slice(0, 100))}
+                
+                Focus: Find existing content that mentions concepts related to "${analysis.primary_topic}" but lacks detail.
+                Return JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
                 config: { responseMimeType: 'application/json' }
             }),
             ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `Audit these links for SEO quality: ${JSON.stringify(existingLinks)}. Topic: "${analysis.primary_topic}".
+                model: 'gemini-3-flash-preview',
+                contents: `INTERNAL LINK AUDIT.
+                Draft Topic: "${analysis.primary_topic}". 
+                Internal links to review: ${JSON.stringify(existingInternalLinks)}.
+                
+                Task: Audit these links for SEO quality. 
+                Ignore any links that are not in the provided list.
                 Return JSON: { "audits": [{ "anchor_text", "url", "score", "relevance_score", "anchor_score", "flow_score", "reasoning", "recommendation", "is_duplicate" }] }`,
                 config: { responseMimeType: 'application/json' }
             })
@@ -305,16 +401,19 @@ const App = () => {
 
         if (outboundTask.status === 'fulfilled') {
             const raw = extractJson(outboundTask.value.text).suggestions || [];
-            setSuggestions(raw.filter((s: Suggestion) => !existingUrls.includes(normalizeUrl(s.target_url))));
+            setSuggestions(raw.filter((s: Suggestion) => !existingInternalUrls.includes(normalizeUrl(s.target_url))));
         }
-        if (inboundTask.status === 'fulfilled') setInboundSuggestions(extractJson(inboundTask.value.text).suggestions || []);
-        if (auditTask.status === 'fulfilled') setExistingAudits(extractJson(auditTask.value.text).audits || []);
+        if (inboundTask.status === 'fulfilled') {
+            setInboundSuggestions(extractJson(inboundTask.value.text).suggestions || []);
+        }
+        if (auditTask.status === 'fulfilled') {
+            setExistingAudits(extractJson(auditTask.value.text).audits || []);
+        }
 
         setCurrentPhase('Analysis Complete.');
     } catch (e) {
         console.error(e);
-        const errorMsg = (e as Error).message;
-        setCurrentPhase('Analysis failed: ' + errorMsg);
+        setCurrentPhase('Analysis failed: ' + (e as Error).message);
     } finally { setIsAnalysisRunning(false); }
   };
 
@@ -322,21 +421,23 @@ const App = () => {
       let content = "";
       if (type === 'markdown') {
           content = `# NexusFlow SEO Report: ${currentAnalysisResult?.primary_topic}\n\n`;
-          content += `## Topic Analysis\n- Topic: ${currentAnalysisResult?.primary_topic}\n- Intent: ${currentAnalysisResult?.user_intent}\n- Stage: ${currentAnalysisResult?.content_stage}\n\n`;
-          content += `## Strategic Outbound Recommendations\n`;
-          suggestions.forEach(s => content += `- [ ] **${s.anchor_text}** linking to ${s.target_url} (${s.strategy_tag})\n  - Reasoning: ${s.reasoning}\n\n`);
+          content += `## Analysis Snapshot\n- **Stage:** ${currentAnalysisResult?.content_stage}\n- **Top Entities:** ${currentAnalysisResult?.key_entities?.join(', ')}\n- **Intent:** ${currentAnalysisResult?.user_intent}\n\n`;
+          content += `## Outbound Strategic Links\n`;
+          suggestions.forEach(s => content += `- **${s.anchor_text}** → ${s.target_url} (${s.strategy_tag})\n`);
+          content += `\n## Inbound Strategy\n`;
+          inboundSuggestions.forEach(s => content += `- Source: "${s.source_page_title}" (Anchor: "${s.suggested_anchor_text}")\n`);
       } else {
           suggestions.forEach(s => content += `${s.paragraph_with_link}\n\n`);
       }
       navigator.clipboard.writeText(content);
-      alert(`${type.toUpperCase()} Report copied to clipboard!`);
+      alert(`${type.toUpperCase()} Report copied!`);
   };
 
   return (
     <div className="app-container">
       <header className="header">
         <h1>NexusFlow AI ⚡</h1>
-        <p>Enterprise Internal Link Optimization</p>
+        <p>User Journey & Search-Grounded Internal Linking</p>
       </header>
 
       <div className="progress-indicator">
@@ -351,30 +452,43 @@ const App = () => {
       <div className="content-body">
         {step === 1 && (
           <div className="wizard-step">
-            <h2>1. Source Draft</h2>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline'}}>
+              <h2>1. Source Draft</h2>
+              {mainArticleUrl && <span className="badge" style={{background:'var(--secondary-color)', fontSize:'0.6rem'}}>Target Domain: {getHostname(mainArticleUrl)}</span>}
+            </div>
             <div className="radio-group" style={{marginBottom: '1rem'}}>
-                <label><input type="radio" checked={mainArticleInputMode === 'fetch'} onChange={() => setMainArticleInputMode('fetch')} /> Fetch URL</label>
-                <label style={{marginLeft:'20px'}}><input type="radio" checked={mainArticleInputMode === 'paste'} onChange={() => setMainArticleInputMode('paste')} /> Paste Draft</label>
+                <label className={mainArticleInputMode === 'fetch' ? 'active' : ''}>
+                    <input type="radio" checked={mainArticleInputMode === 'fetch'} onChange={() => setMainArticleInputMode('fetch')} /> 
+                    Fetch URL
+                </label>
+                <label className={mainArticleInputMode === 'paste' ? 'active' : ''} style={{marginLeft:'20px'}}>
+                    <input type="radio" checked={mainArticleInputMode === 'paste'} onChange={() => setMainArticleInputMode('paste')} /> 
+                    Paste Draft
+                </label>
             </div>
             {mainArticleInputMode === 'fetch' ? (
                 <div className="input-group">
                     <input type="text" className="input" placeholder="https://..." value={mainArticleUrl} onChange={e => setMainArticleUrl(e.target.value)} />
-                    <button className="btn btn-primary" onClick={handleFetchArticle} disabled={isProcessingMain}>Fetch</button>
+                    <button className="btn btn-primary" onClick={handleFetchArticle} disabled={isProcessingMain}>
+                        {isProcessingMain ? 'Fetching...' : 'Fetch'}
+                    </button>
                 </div>
-            ) : <textarea className="input" placeholder="Paste HTML or Text here..." value={mainArticle} onChange={e => setMainArticle(e.target.value)} />}
+            ) : <textarea className="input" placeholder="Paste HTML or Text draft here..." value={mainArticle} onChange={e => setMainArticle(e.target.value)} />}
+            
+            {mainArticleStatus.message && <div className={`status-message ${mainArticleStatus.type}`}>{mainArticleStatus.message}</div>}
           </div>
         )}
 
         {step === 2 && (
           <div className="wizard-step">
-            <h2>2. Link Inventory</h2>
+            <h2>2. Site Inventory</h2>
             <div className="radio-group" style={{marginBottom: '1.5rem'}}>
-                <label><input type="radio" checked={inventoryInputMode === 'sitemap'} onChange={() => setInventoryInputMode('sitemap')} /> Sitemap XML URL</label>
-                <label style={{marginLeft:'20px'}}><input type="radio" checked={inventoryInputMode === 'file'} onChange={() => setInventoryInputMode('file')} /> Upload CSV/XML</label>
+                <label><input type="radio" checked={inventoryInputMode === 'sitemap'} onChange={() => setInventoryInputMode('sitemap')} /> Sitemap XML</label>
+                <label style={{marginLeft:'20px'}}><input type="radio" checked={inventoryInputMode === 'file'} onChange={() => setInventoryInputMode('file')} /> CSV/XML File</label>
             </div>
             {inventoryInputMode === 'sitemap' ? (
                 <div className="input-group">
-                    <input type="text" className="input" placeholder="https://..." value={sitemapUrl} onChange={e => setSitemapUrl(e.target.value)} />
+                    <input type="text" className="input" placeholder="https://example.com/sitemap.xml" value={sitemapUrl} onChange={e => setSitemapUrl(e.target.value)} />
                     <button className="btn btn-primary" onClick={async () => {
                         setIsProcessingInventory(true);
                         try {
@@ -399,16 +513,16 @@ const App = () => {
 
         {step === 3 && (
             <div className="wizard-step">
-                <h2>3. Strategic Parameters</h2>
+                <h2>3. Strategy Map</h2>
                 <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px'}}>
                     <div className="review-box" style={{borderLeftColor:'#8b5cf6'}}>
-                        <strong>💰 Money Page Identifiers</strong>
+                        <strong>💰 Money Patterns</strong>
                         <div style={{marginTop:'10px', display:'flex', flexWrap:'wrap', gap:'5px'}}>
                             {moneyPatterns.map(p => <span key={p} className="badge badge-money">{p}</span>)}
                         </div>
                     </div>
                     <div className="review-box" style={{borderLeftColor:'#06b6d4'}}>
-                        <strong>🏛️ Pillar Hub Identifiers</strong>
+                        <strong>🏛️ Pillar Patterns</strong>
                         <div style={{marginTop:'10px', display:'flex', flexWrap:'wrap', gap:'5px'}}>
                             {pillarPatterns.map(p => <span key={p} className="badge badge-pillar">{p}</span>)}
                         </div>
@@ -421,7 +535,7 @@ const App = () => {
             <div className="wizard-step">
                 {!isAnalysisRunning && suggestions.length === 0 && (
                     <div style={{textAlign:'center', padding:'3rem'}}>
-                        <button className="btn btn-primary" style={{padding:'1rem 3rem'}} onClick={runFastAnalysis}>Launch Link Analysis</button>
+                        <button className="btn btn-primary" style={{padding:'1rem 3rem'}} onClick={runFastAnalysis}>Generate Link Map</button>
                     </div>
                 )}
                 
@@ -436,22 +550,23 @@ const App = () => {
                     <div className="results-container">
                         <div className="strategy-dashboard">
                             <div className="sd-card">
-                                <span className="sd-label">Topic</span>
-                                <div className="sd-value">{currentAnalysisResult.primary_topic}</div>
+                                <span className="sd-label">Stage</span>
+                                <div className="sd-value" style={{color:'var(--primary-color)'}}>{currentAnalysisResult.content_stage}</div>
                             </div>
-                            <div className="sd-card"><span className="sd-label">Intent</span><div className="sd-value">{currentAnalysisResult.user_intent}</div></div>
-                            <div className="sd-card"><span className="sd-label">Funnel</span><div className="sd-value" style={{color:'var(--primary-color)'}}>{currentAnalysisResult.content_stage}</div></div>
-                        </div>
-
-                        <div style={{display:'flex', gap:'10px', marginBottom:'2rem'}}>
-                            <button className="btn btn-secondary" onClick={() => copyToClipboard('markdown')}>Copy Markdown Report</button>
-                            <button className="btn btn-secondary" onClick={() => copyToClipboard('html')}>Copy HTML Snippet</button>
+                            <div className="sd-card">
+                                <span className="sd-label">Intent</span>
+                                <div className="sd-value">{currentAnalysisResult.user_intent}</div>
+                            </div>
+                            <div className="sd-card">
+                                <span className="sd-label">Key Entities</span>
+                                <div className="sd-value" style={{fontSize:'0.8rem'}}>{currentAnalysisResult.key_entities?.join(', ') || 'N/A'}</div>
+                            </div>
                         </div>
 
                         <div className="tabs-header">
                             <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>Strategic Outbound ({suggestions.length})</button>
-                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound Backlinks ({inboundSuggestions.length})</button>
-                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Audit ({existingAudits.length})</button>
+                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound Sources ({inboundSuggestions.length})</button>
+                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Link Audit ({existingAudits.length})</button>
                         </div>
 
                         {activeTab === 'outbound' && (
@@ -459,17 +574,33 @@ const App = () => {
                                 {suggestions.map((s, i) => (
                                     <div key={i} className="suggestion-item">
                                         <div className="suggestion-header">
-                                            <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
-                                              <h3>{s.anchor_text}</h3>
-                                              {s.is_paa_match && <span className="badge" style={{background:'var(--success-color)'}}>Verified Connection</span>}
-                                            </div>
+                                            <h3>{s.anchor_text}</h3>
                                             <span className={`badge ${s.target_type === 'MONEY_PAGE' ? 'badge-money' : s.target_type === 'STRATEGIC_PILLAR' ? 'badge-pillar' : 'new'}`}>{s.target_type}</span>
                                         </div>
                                         <p style={{fontSize:'0.85rem', marginBottom:'10px'}}>Target: <a href={s.target_url} target="_blank">{s.target_url}</a></p>
-                                        <div className="suggestion-context" style={{borderLeftColor: s.is_paa_match ? 'var(--success-color)' : 'var(--accent-color)'}}>
-                                            <strong>Contextual Logic:</strong> {s.reasoning}
+                                        <div className="suggestion-context">
+                                          <strong>Reasoning:</strong> {s.reasoning}<br/>
+                                          {s.matched_paa_question && <div style={{marginTop:'5px', color:'var(--success-color)', fontWeight:'bold'}}>Verified: Answers PAA Question - {s.matched_paa_question}</div>}
                                         </div>
-                                        <div style={{marginTop:'1rem', fontSize:'0.9rem'}} dangerouslySetInnerHTML={{__html: s.paragraph_with_link}} />
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {activeTab === 'inbound' && (
+                            <div className="tab-content">
+                                {inboundSuggestions.length === 0 ? (
+                                    <p style={{textAlign:'center', padding:'2rem', color:'var(--text-muted)'}}>No strong inbound candidates found in inventory. Expand your site map and re-run.</p>
+                                ) : inboundSuggestions.map((s, i) => (
+                                    <div key={i} className="suggestion-item">
+                                        <div className="suggestion-header">
+                                            <h3>From: {s.source_page_title}</h3>
+                                        </div>
+                                        <p style={{fontSize:'0.85rem'}}>Source URL: <a href={s.source_page_url} target="_blank">{s.source_page_url}</a></p>
+                                        <div className="suggestion-context">
+                                            <strong>Suggested Anchor:</strong> "{s.suggested_anchor_text}"<br/>
+                                            <strong>Topical Bridge:</strong> {s.reasoning}
+                                        </div>
                                     </div>
                                 ))}
                             </div>
@@ -477,18 +608,24 @@ const App = () => {
 
                         {activeTab === 'audit' && (
                             <div className="tab-content">
-                                {existingAudits.map((a, i) => (
+                                {existingAudits.length === 0 ? (
+                                    <p style={{textAlign:'center', padding:'2rem', color:'var(--text-muted)'}}>No existing internal links found in the draft to audit.</p>
+                                ) : existingAudits.map((a, i) => (
                                     <div key={i} className="suggestion-item">
                                         <div className="suggestion-header">
                                             <h3>"{a.anchor_text}"</h3>
-                                            <div style={{fontWeight:'bold', color: a.score > 80 ? 'var(--success-color)' : 'var(--error-color)'}}>{a.score}% Health</div>
+                                            <div style={{fontWeight:'bold', color: a.score > 80 ? 'var(--success-color)' : 'var(--error-color)'}}>{a.score}% Quality</div>
                                         </div>
-                                        <p style={{fontSize:'0.85rem'}}>URL: {a.url}</p>
+                                        <p style={{fontSize:'0.85rem'}}>Path: {a.url}</p>
                                         <div className="suggestion-context" style={{marginTop:'10px'}}>{a.recommendation}</div>
                                     </div>
                                 ))}
                             </div>
                         )}
+
+                        <div style={{display:'flex', gap:'10px', marginTop:'2rem'}}>
+                            <button className="btn btn-secondary" onClick={() => copyToClipboard('markdown')}>Copy Full Report</button>
+                        </div>
                     </div>
                 )}
             </div>
@@ -497,7 +634,7 @@ const App = () => {
 
       <div className="navigation-buttons">
             <button className="btn btn-secondary" onClick={() => setStep(s => Math.max(1, s - 1))} disabled={step === 1 || isAnalysisRunning}>Back</button>
-            {step < 4 && <button className="btn btn-primary" onClick={() => setStep(s => Math.min(4, s + 1))} disabled={step === 1 ? !mainArticleHtml && !mainArticle : step === 2 ? parsedArticles.length === 0 : false}>Next</button>}
+            {step < 4 && <button className="btn btn-primary" onClick={() => setStep(s => Math.min(4, s + 1))} disabled={step === 1 ? (!mainArticleHtml && !mainArticle) : step === 2 ? parsedArticles.length === 0 : false}>Next</button>}
       </div>
     </div>
   );
