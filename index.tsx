@@ -34,6 +34,8 @@ interface Suggestion {
     paragraph_with_link: string;
     reasoning: string;
     strategy_tag: string;
+    is_paa_match?: boolean;
+    matched_paa_question?: string;
 }
 
 interface InboundSuggestion {
@@ -42,6 +44,13 @@ interface InboundSuggestion {
     relevance_score: number;
     reasoning: string;
     suggested_anchor_text: string;
+}
+
+interface GroundingChunk {
+  web?: {
+    uri: string;
+    title: string;
+  };
 }
 
 // --- Constants ---
@@ -70,15 +79,6 @@ const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
         } catch (e) { console.warn(`Proxy ${i} failed for ${url}`); }
     }
     throw new Error(`Unable to fetch. Please use "Manual Paste".`);
-};
-
-const normalizeUrl = (urlString: string): string => {
-  try {
-    const url = new URL(urlString);
-    let pathname = url.pathname.toLowerCase();
-    if (pathname.length > 1 && pathname.endsWith('/')) pathname = pathname.slice(0, -1);
-    return `${url.origin.toLowerCase()}${pathname}`;
-  } catch (e) { return urlString.toLowerCase(); }
 };
 
 const extractJson = (text: string) => {
@@ -135,6 +135,7 @@ const App = () => {
   const [currentAnalysisResult, setCurrentAnalysisResult] = useState<AnalysisResult | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [inboundSuggestions, setInboundSuggestions] = useState<InboundSuggestion[]>([]);
+  const [groundingLinks, setGroundingLinks] = useState<{title: string, uri: string}[]>([]);
   const [isAnalysisRunning, setIsAnalysisRunning] = useState(false);
   const [currentPhase, setCurrentPhase] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -201,7 +202,7 @@ const App = () => {
   const runFastAnalysis = async () => {
     setIsAnalysisRunning(true);
     setError(null);
-    setCurrentPhase('Initializing High-Speed Pipeline...');
+    setCurrentPhase('Launching Intelligent Search Pipeline...');
     
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
     const rawContent = mainArticleInputMode === 'fetch' ? mainArticleHtml : mainArticle;
@@ -210,38 +211,69 @@ const App = () => {
     const targetOutboundCount = Math.min(15, Math.max(3, Math.ceil(wordCount / 250)));
 
     try {
-        const [classTask, outboundTask, inboundTask] = await Promise.allSettled([
+        // STEP 1: Parallel Discovery (Grounding + Classification)
+        setCurrentPhase('Fetching live PAA questions & classifying content...');
+        const [classTask, paaTask] = await Promise.all([
+          ai.models.generateContent({
+              model: 'gemini-3-flash-preview',
+              contents: `Analyze Content Role:\n${compactContent.substring(0, 5000)}\nReturn JSON: { "primary_topic", "user_intent", "content_stage": "Awareness|Consideration|Decision", "key_entities": [] }`,
+              config: { responseMimeType: 'application/json' }
+          }),
+          ai.models.generateContent({
+              model: 'gemini-3-flash-preview',
+              contents: `Search for the top 5 'People Also Ask' questions related to: "${compactContent.substring(0, 500)}". List them clearly.`,
+              config: { tools: [{googleSearch: {}}] }
+          })
+        ]);
+
+        const analysis = extractJson(classTask.text);
+        setCurrentAnalysisResult(analysis);
+        
+        // Extract grounding sources per rules
+        const groundingChunks = (paaTask.candidates?.[0]?.groundingMetadata?.groundingChunks as GroundingChunk[]) || [];
+        const discoveredLinks = groundingChunks.filter(c => c.web).map(c => ({
+            title: c.web!.title,
+            uri: c.web!.uri
+        }));
+        setGroundingLinks(discoveredLinks);
+        const paaQuestionsText = paaTask.text;
+
+        // STEP 2: Strategic Mapping (Parallel Outbound + Inbound)
+        setCurrentPhase(`Architecting ${targetOutboundCount} strategic link journeys...`);
+        const searchPool = parsedArticles.slice(0, 50).map(p => ({ 
+            url: p.url, 
+            title: p.title, 
+            type: moneyPatterns.some(m => p.url.includes(m)) ? 'MONEY_PAGE' : pillarPatterns.some(pp => p.url.includes(pp)) ? 'STRATEGIC_PILLAR' : 'CONTENT' 
+        }));
+
+        const [outboundTask, inboundTask] = await Promise.allSettled([
             ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
-                contents: `Analyze Content Role:\n${compactContent.substring(0, 5000)}\nReturn JSON: { "primary_topic", "user_intent", "content_stage": "Awareness|Consideration|Decision", "key_entities": [] }`,
+                contents: `Context: Internal Linking Architecture.
+                Source Primary Topic: ${analysis.primary_topic}
+                PAA Discovery Context: ${paaQuestionsText}
+
+                Task: Find ${targetOutboundCount} logical link placements.
+                Content: ${compactContent}
+                Inventory: ${JSON.stringify(searchPool)}
+                
+                Rules:
+                1. Use "Bridge" anchors.
+                2. If a target URL answers a specific PAA question from the list above, set "is_paa_match": true and "matched_paa_question": "THE EXACT QUESTION".
+                3. If is_paa_match is true, the "reasoning" MUST be: "This link is a Google Verified journey link because it answers the PAA question: '[MATCHED QUESTION]'"
+                
+                Return JSON: { "suggestions": [{ "anchor_text", "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "strategy_tag", "is_paa_match", "matched_paa_question" }] }`,
                 config: { responseMimeType: 'application/json' }
             }),
-            (async () => {
-                const searchPool = parsedArticles.slice(0, 50).map(p => ({ 
-                    url: p.url, 
-                    title: p.title, 
-                    type: moneyPatterns.some(m => p.url.includes(m)) ? 'MONEY_PAGE' : pillarPatterns.some(pp => p.url.includes(pp)) ? 'STRATEGIC_PILLAR' : 'CONTENT' 
-                }));
-                return ai.models.generateContent({
-                    model: 'gemini-3-flash-preview',
-                    contents: `Context: Internal Linking Strategy.
-                    Task: Find ${targetOutboundCount} logical link placements.
-                    Content: ${compactContent}
-                    Inventory: ${JSON.stringify(searchPool)}
-                    Rules: Use "Bridge" anchors. Return JSON: { "suggestions": [{ "anchor_text", "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "strategy_tag" }] }`,
-                    config: { responseMimeType: 'application/json' }
-                });
-            })(),
             ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
-                contents: `Find 5 pages from this inventory that should link TO an article about the topic found in this text: "${compactContent.substring(0, 500)}".
+                contents: `Find 5 pages from this inventory that should link TO an article about: "${analysis.primary_topic}".
                 Inventory: ${JSON.stringify(parsedArticles.slice(0, 40).map(p => ({ title: p.title, url: p.url })))}
                 Return JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
                 config: { responseMimeType: 'application/json' }
             })
         ]);
 
-        if (classTask.status === 'fulfilled') setCurrentAnalysisResult(extractJson(classTask.value.text));
         if (outboundTask.status === 'fulfilled') setSuggestions(extractJson(outboundTask.value.text).suggestions || []);
         if (inboundTask.status === 'fulfilled') setInboundSuggestions(extractJson(inboundTask.value.text).suggestions || []);
 
@@ -312,9 +344,6 @@ const App = () => {
             )}
             
             {existingPagesStatus.message && <div className={`status-message ${existingPagesStatus.type}`}>{existingPagesStatus.message}</div>}
-            <p style={{fontSize:'0.85rem', color:'var(--text-muted)', marginTop:'0.5rem'}}>
-                Tip: For files, ensure CSV has <code>URL,Title</code> structure or use a standard XML sitemap file.
-            </p>
           </div>
         )}
 
@@ -363,6 +392,19 @@ const App = () => {
                             <div className="sd-card"><span className="sd-label">Funnel</span><div className="sd-value" style={{color:'var(--primary-color)'}}>{currentAnalysisResult.content_stage}</div></div>
                         </div>
 
+                        {groundingLinks.length > 0 && (
+                          <div className="review-box" style={{marginBottom:'2rem', borderLeftColor:'var(--accent-color)'}}>
+                            <span className="sd-label">PAA Grounding Sources</span>
+                            <div style={{display:'flex', flexWrap:'wrap', gap:'10px', marginTop:'5px'}}>
+                                {groundingLinks.map((link, idx) => (
+                                  <a key={idx} href={link.uri} target="_blank" className="badge" style={{background:'var(--accent-color)', textDecoration:'none'}}>
+                                    {link.title}
+                                  </a>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+
                         <div className="tabs-header">
                             <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>Outbound ({suggestions.length})</button>
                             <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound ({inboundSuggestions.length})</button>
@@ -373,10 +415,14 @@ const App = () => {
                                 {suggestions.map((s, i) => (
                                     <div key={i} className="suggestion-item">
                                         <div className="suggestion-header">
-                                            <h3>{s.anchor_text}</h3>
+                                            <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
+                                              <h3>{s.anchor_text}</h3>
+                                              {s.is_paa_match && <span className="badge" style={{background:'var(--success-color)'}}>Google Verified</span>}
+                                            </div>
                                             <span className={`badge ${s.target_type === 'MONEY_PAGE' ? 'badge-money' : s.target_type === 'STRATEGIC_PILLAR' ? 'badge-pillar' : 'new'}`}>{s.target_type}</span>
                                         </div>
                                         <p style={{fontSize:'0.85rem'}}>Target: <a href={s.target_url} target="_blank">{s.target_url}</a></p>
+                                        <p style={{margin:'10px 0', fontSize:'0.9rem', color:'var(--text-muted)'}}>{s.reasoning}</p>
                                         <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px', marginTop:'1rem'}}>
                                             <div className="suggestion-context" dangerouslySetInnerHTML={{__html: s.original_paragraph}} />
                                             <div className="suggestion-context" style={{borderLeftColor:'var(--success-color)'}} dangerouslySetInnerHTML={{__html: s.paragraph_with_link}} />
