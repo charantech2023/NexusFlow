@@ -79,15 +79,6 @@ interface InboundSuggestion {
     placementError?: string;
 }
 
-interface LinkDensityStats {
-    wordCount: number;
-    existingLinksCount: number;
-    recommendedTotal: number;
-    suggestionsLimit: number;
-    readabilityScore: number;
-    readabilityLabel: string;
-}
-
 interface PaaData {
     questions: string[];
     source_urls: { title: string; uri: string }[];
@@ -133,7 +124,7 @@ const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
             if (response.ok) return response;
         } catch (e) { console.warn(`Proxy ${i} failed for ${url}`); }
     }
-    throw new Error(`Unable to fetch content. Please use "Manual Paste".`);
+    throw new Error(`Unable to fetch content. This is usually due to CORS restrictions or site blocks. Please use the "Manual Paste" option.`);
 };
 
 const normalizeUrl = (urlString: string): string => {
@@ -342,29 +333,45 @@ const App = () => {
           if (type === 'xml') {
               const parser = new DOMParser();
               const doc = parser.parseFromString(content, "application/xml");
-              const locs = Array.from(doc.getElementsByTagName('loc'));
-              locs.forEach(node => {
-                  const loc = node.textContent?.trim();
-                  if (loc && isSuitableTarget(loc) && !loc.toLowerCase().endsWith('.xml')) {
-                    articlesMap.set(normalizeUrl(loc), { title: '', url: loc, type: 'Blog' });
+              
+              // More robust extraction using tag name across possible namespaces
+              let locElements = Array.from(doc.getElementsByTagName('loc'));
+              
+              // Regex fallback for stubborn XML or malformed parser results
+              if (locElements.length === 0) {
+                  const locRegex = /<loc>(.*?)<\/loc>/gi;
+                  let match;
+                  while ((match = locRegex.exec(content)) !== null) {
+                      const loc = match[1].trim();
+                      if (loc && isSuitableTarget(loc) && !loc.toLowerCase().endsWith('.xml')) {
+                          articlesMap.set(normalizeUrl(loc), { title: '', url: loc, type: 'Blog' });
+                      }
                   }
-              });
+              } else {
+                  locElements.forEach(node => {
+                      const loc = node.textContent?.trim();
+                      if (loc && isSuitableTarget(loc) && !loc.toLowerCase().endsWith('.xml')) {
+                        articlesMap.set(normalizeUrl(loc), { title: '', url: loc, type: 'Blog' });
+                      }
+                  });
+              }
           } else {
+              // CSV logic - ensure we split properly and handle optional quotes
               const lines = content.split(/\r?\n/).filter(line => line.trim().length > 0);
               const startIndex = (lines[0].toLowerCase().includes('url')) ? 1 : 0;
               lines.slice(startIndex).forEach(line => {
                   const parts = line.split(',');
-                  const url = parts[0]?.replace(/^"|"$/g, '').trim();
-                  const title = parts[1]?.replace(/^"|"$/g, '').trim();
+                  const url = parts[0]?.replace(/^["']|["']$/g, '').trim();
+                  const title = parts[1]?.replace(/^["']|["']$/g, '').trim();
                   if (url && isSuitableTarget(url)) articlesMap.set(normalizeUrl(url), { title: title || '', url, type: 'Blog' });
               });
           }
 
           const articles = Array.from(articlesMap.values());
-          if (articles.length === 0) throw new Error("No valid URLs found.");
+          if (articles.length === 0) throw new Error("No valid URLs found in the provided source.");
           setParsedArticles(articles);
           localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(articles));
-          setExistingPagesStatus({ message: `Loaded ${articles.length} pages.`, type: 'success' });
+          setExistingPagesStatus({ message: `Success: Loaded ${articles.length} pages.`, type: 'success' });
       } catch (e) {
           setExistingPagesStatus({ message: `Processing failed: ${(e as Error).message}`, type: 'error' });
       }
@@ -446,7 +453,7 @@ Return JSON: { "original_paragraph": "string", "new_paragraph_html": "string" }`
       }
   };
 
-  const processOutboundBatch = async (candidates: ParsedArticle[], content: string, analysis: AnalysisResult): Promise<Suggestion[]> => {
+  const processOutboundBatch = async (candidates: ParsedArticle[], content: string, analysis: AnalysisResult, targetCount: number): Promise<Suggestion[]> => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
       const cleanSource = cleanHtmlContent(content);
       
@@ -462,12 +469,14 @@ Return JSON: { "original_paragraph": "string", "new_paragraph_html": "string" }`
 Source Content Stage: ${analysis.content_stage}
 Source Primary Topic: ${analysis.primary_topic}
 
+Target Density: Based on the content length, I need exactly ${targetCount} strategic link suggestions.
+
 Journey Framework (Link Priorities):
 1. MONEY_PAGE (Conversion): Prioritize these for logic "Next Step" CTAs if source is Consideration/Decision stage.
 2. STRATEGIC_PILLAR (Authority): Prioritize these if the source is Awareness stage to build topical depth.
 3. STANDARD_CONTENT (Supporting): Use for deep-dives into specific sub-entities.
 
-Constraint: You MUST select an EXACT paragraph from the "Main Content" provided.
+CRITICAL INSTRUCTION: You MUST select an EXACT paragraph from the "Main Content" provided below. Do not hallucinate content.
 
 Input Content: 
 ${cleanSource}
@@ -481,8 +490,8 @@ Output Format: JSON.
     "anchor_text": "string", 
     "target_url": "string", 
     "target_type": "MONEY_PAGE|STRATEGIC_PILLAR|STANDARD_CONTENT",
-    "original_paragraph": "EXACT TEXT", 
-    "paragraph_with_link": "EDITED TEXT",
+    "original_paragraph": "THE EXACT ORIGINAL TEXT OF THE PARAGRAPH YOU CHOSE FROM THE INPUT", 
+    "paragraph_with_link": "THE CHOSEN PARAGRAPH WITH <a href='target_url'>anchor_text</a> INSERTED NATURALLY",
     "reasoning": "string",
     "strategy_tag": "string"
   }]
@@ -505,6 +514,11 @@ Output Format: JSON.
     const content = mainArticleInputMode === 'fetch' ? mainArticleHtml : mainArticle;
     const cleanContent = cleanHtmlContent(content);
 
+    // Calculate dynamic suggestion count based on word count
+    const wordCount = cleanContent.split(/\s+/).filter(word => word.length > 0).length;
+    // Rule: Approx 1 link per 200 words, min 3, max 15
+    const targetOutboundCount = Math.min(15, Math.max(3, Math.ceil(wordCount / 200)));
+
     try {
         const classResponse = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
@@ -516,10 +530,12 @@ Output Format: JSON.
         setCurrentAnalysisResult(analysis);
 
         if (analysisConfig.outbound) {
-            setCurrentPhase('Architecting strategic outbound journeys...');
-            const batch = parsedArticles.slice(0, 45);
-            const res = await processOutboundBatch(batch, content, analysis);
-            setSuggestions(res.slice(0, 10));
+            setCurrentPhase(`Architecting ${targetOutboundCount} strategic outbound journeys...`);
+            // Increase search window if we need more links
+            const batchSize = Math.max(45, targetOutboundCount * 5);
+            const batch = parsedArticles.slice(0, batchSize);
+            const res = await processOutboundBatch(batch, content, analysis, targetOutboundCount);
+            setSuggestions(res);
         }
 
         if (analysisConfig.inbound) {
@@ -594,10 +610,15 @@ Output Format: JSON.
                             processInventory(await res.text(), 'xml');
                         } catch(e) { setExistingPagesStatus({message: (e as Error).message, type: 'error'}); }
                         finally { setIsProcessingInventory(false); }
-                    }} disabled={isProcessingInventory}>Load</button>
+                    }} disabled={isProcessingInventory}>Load Sitemap</button>
                 </div>
-            ) : <input type="file" className="input" accept=".csv,.xml" onChange={handleFileUpload} />}
+            ) : (
+                <div className="input-group">
+                    <input type="file" className="input" accept=".csv,.xml" onChange={handleFileUpload} />
+                </div>
+            )}
             {existingPagesStatus.message && <div className={`status-message ${existingPagesStatus.type}`}>{existingPagesStatus.message}</div>}
+            <p style={{fontSize: '0.85rem', color: 'var(--text-muted)'}}>Supported: XML Sitemap URLs, XML Files, and CSV Files (Column 1: URL, Column 2: Title).</p>
           </div>
         )}
 
@@ -657,7 +678,7 @@ Output Format: JSON.
 
                         {activeResultTab === 'outbound' && (
                             <div className="tab-content">
-                                {suggestions.map((s, i) => {
+                                {suggestions.length === 0 ? <div className="status-message warning">No suitable outbound link opportunities found for the selected targets.</div> : suggestions.map((s, i) => {
                                     const badgeClass = s.target_type === 'MONEY_PAGE' ? 'badge-money' : s.target_type === 'STRATEGIC_PILLAR' ? 'badge-pillar' : 'new';
                                     const badgeLabel = s.target_type === 'MONEY_PAGE' ? 'Money Page' : s.target_type === 'STRATEGIC_PILLAR' ? 'Strategic Pillar' : 'Supporting Content';
                                     
@@ -674,7 +695,7 @@ Output Format: JSON.
                                                 <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'1.5rem', marginTop:'1rem'}}>
                                                     <div>
                                                         <span className="sd-label">Original Content</span>
-                                                        <div className="suggestion-context" style={{borderLeftColor:'#e2e8f0'}} dangerouslySetInnerHTML={{__html: s.original_paragraph}} />
+                                                        <div className="suggestion-context" style={{borderLeftColor:'#e2e8f0'}} dangerouslySetInnerHTML={{__html: s.original_paragraph || 'Text not mapped'}} />
                                                     </div>
                                                     <div>
                                                         <span className="sd-label" style={{color:'var(--success-color)'}}>Optimized with Link</span>
