@@ -19,6 +19,7 @@ interface AnalysisResult {
     user_intent: string;
     content_stage: 'Awareness' | 'Consideration' | 'Decision'; 
     key_entities: string[];
+    topology_role: 'HUB' | 'AUTHORITY' | 'CENTER';
 }
 
 interface Suggestion {
@@ -31,9 +32,12 @@ interface Suggestion {
     paragraph_with_link: string;
     reasoning: string;
     strategy_tag: string;
-    information_gain_score: number; // Patent 10,642,897
-    surfer_score: number;           // Patent 7,716,216 (Reasonable Surfer)
-    thematic_alignment: number;      // Patent 6,799,176 (Topic-Sensitive)
+    information_gain_score: number; 
+    surfer_score: number;           
+    thematic_alignment: number;      
+    connectivity_efficiency: number; 
+    target_role: 'HUB' | 'AUTHORITY' | 'CENTER';
+    nexus_score: number; 
 }
 
 interface ExistingLinkAudit {
@@ -82,13 +86,13 @@ const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
     for (const proxy of PROXIES) {
         try {
             const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 15000); 
+            const id = setTimeout(() => controller.abort(), 12000); 
             const response = await fetch(proxy(url), { method: 'GET', signal: controller.signal });
             clearTimeout(id);
             if (response.ok) return response;
         } catch (e) { lastError = e; }
     }
-    throw new Error(lastError ? `Access blocked. Use "Paste HTML" mode or check the URL.` : "Fetch failed.");
+    throw new Error(lastError ? `CORS/Proxy Error. Try "Paste HTML" mode instead.` : "Fetch failed.");
 };
 
 const getHostname = (urlString: string): string => {
@@ -110,7 +114,12 @@ const extractJson = (text: string) => {
         const jsonText = (match && match[1]) ? match[1] : text.trim();
         const start = jsonText.indexOf('{');
         const end = jsonText.lastIndexOf('}');
-        if (start === -1 || end === -1) throw new Error("Invalid JSON structure");
+        if (start === -1 || end === -1) {
+            const arrStart = jsonText.indexOf('[');
+            const arrEnd = jsonText.lastIndexOf(']');
+            if (arrStart !== -1 && arrEnd !== -1) return JSON.parse(jsonText.substring(arrStart, arrEnd + 1));
+            throw new Error("Invalid JSON structure");
+        }
         return JSON.parse(jsonText.substring(start, end + 1));
     } catch (e) {
         console.error("JSON Parse Error:", e, text);
@@ -164,6 +173,21 @@ const extractInternalLinks = (html: string, baseDomain: string, inventory: Parse
     return links;
 };
 
+// --- Components ---
+
+const NexusBadge = ({ score }: { score: number }) => {
+    let color = 'var(--error-color)';
+    if (score > 70) color = 'var(--success-color)';
+    else if (score > 40) color = 'var(--warning-color)';
+    
+    return (
+        <div className="nexus-score-circle" style={{ borderColor: color }}>
+            <span style={{ color }}>{Math.round(score)}</span>
+            <small>NEXUS</small>
+        </div>
+    );
+};
+
 // --- Main App ---
 
 const App = () => {
@@ -186,6 +210,7 @@ const App = () => {
   const [audit, setAudit] = useState<ExistingLinkAudit[]>([]);
   const [isAnalysing, setIsAnalysing] = useState(false);
   const [activeTab, setActiveTab] = useState<'outbound' | 'inbound' | 'audit'>('outbound');
+  const [expandedSuggestion, setExpandedSuggestion] = useState<number | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem(SAVED_ARTICLES_KEY);
@@ -195,12 +220,12 @@ const App = () => {
   const handleFetchDraft = async () => {
     if (!draftUrl) return;
     setIsProcessingSource(true);
-    setSourceStatus({ message: 'Scrubbing noise & structure...', type: 'info' });
+    setSourceStatus({ message: 'Initializing scrub...', type: 'info' });
     try {
       const res = await fetchWithProxyFallbacks(draftUrl);
       const html = await res.text();
       setDraftHtml(html);
-      setSourceStatus({ message: 'Source prepared.', type: 'success' });
+      setSourceStatus({ message: 'Source fetched successfully.', type: 'success' });
     } catch (e) {
       setSourceStatus({ message: (e as Error).message, type: 'error' });
     } finally { setIsProcessingSource(false); }
@@ -226,7 +251,7 @@ const App = () => {
     try {
         const initialRes = await fetchWithProxyFallbacks(inventoryUrl);
         const subSitemaps = parseSitemapString(await initialRes.text());
-        for (const sub of subSitemaps.slice(0, 15)) {
+        for (const sub of subSitemaps.slice(0, 10)) {
             try {
                 const res = await fetchWithProxyFallbacks(sub);
                 parseSitemapString(await res.text());
@@ -237,8 +262,8 @@ const App = () => {
         }));
         setInventory(items);
         localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(items));
-        alert(`Discovered ${items.length} pages.`);
-    } catch (e) { alert("Sitemap fetch failed."); }
+        alert(`Discovered ${items.length} nodes.`);
+    } catch (e) { alert("Sitemap scan failed. Try CSV upload."); }
     finally { setIsProcessingInv(false); }
   };
 
@@ -253,14 +278,14 @@ const App = () => {
       const newItems: ParsedArticle[] = lines.slice(1).map(line => {
         const parts = line.split(',');
         const url = parts[0]?.trim();
-        const title = parts[1]?.trim() || url.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') || url;
+        const title = parts[1]?.trim() || url?.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') || url;
         return { url, title, type: 'CONTENT' };
-      }).filter(item => item.url.startsWith('http'));
+      }).filter(item => item.url && item.url.startsWith('http'));
       
       setInventory(newItems);
       localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(newItems));
       setIsProcessingInv(false);
-      alert(`Imported ${newItems.length} pages from CSV.`);
+      alert(`Imported ${newItems.length} nodes.`);
     };
     reader.readAsText(file);
   };
@@ -276,10 +301,10 @@ const App = () => {
     try {
         const task1 = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: `Identify Funnel & Entities:
+            contents: `Analyze Content Archetype:
             CONTENT:
             ${md}
-            Return JSON: { "primary_topic", "user_intent", "content_stage", "key_entities": [] }`,
+            JSON Format: { "primary_topic", "user_intent", "content_stage", "key_entities": [], "topology_role": "HUB" | "AUTHORITY" | "CENTER" }`,
             config: { responseMimeType: 'application/json' }
         });
         const res1 = extractJson(task1.text);
@@ -292,66 +317,66 @@ const App = () => {
 
         const task2 = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: `TASK: Identify HIGH INFORMATION GAIN & SURFER-VALIDATED internal links.
-            TOPIC: ${res1.primary_topic}
-            STAGE: ${res1.content_stage}
+            contents: `Strategic Internal Link Mapping Task:
+            SOURCE_ROLE: ${res1.topology_role}
             INVENTORY: ${JSON.stringify(sampledInventory)}
-            CONTENT:
-            ${md}
+            CONTENT: ${md}
 
-            PATENT-ALIGNED HEURISTICS:
-            1. Information Gain (10,642,897): Priority to links providing additive data delta.
-            2. Reasonable Surfer (7,716,216): Body links near section starts are high-value. 
-            3. Thematic Alignment (6,799,176): Match intent and semantic proximity.
+            Patent Heuristics:
+            1. Info Gain: Destination must provide new knowledge delta.
+            2. Reasonable Surfer: Body links > generic links.
+            3. Flow: Connect to relevant Authorities.
 
-            STRICT RULES:
-            1. DO NOT MODIFY BODY TEXT. Use VERBATIM substrings.
-            2. Rank each by: information_gain_score, surfer_score (click probability), thematic_alignment.
-
-            Return JSON: { "suggestions": [{ "suggestion_type", "anchor_text", "original_anchor" (optional), "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "information_gain_score", "surfer_score", "thematic_alignment" }] }`,
+            STRICT: Use VERBATIM substrings from CONTENT.
+            JSON Format: { "suggestions": [{ "suggestion_type", "anchor_text", "target_url", "target_type", "target_role", "original_paragraph", "paragraph_with_link", "reasoning", "information_gain_score", "surfer_score", "thematic_alignment", "connectivity_efficiency" }] }`,
             config: { responseMimeType: 'application/json' }
         });
         const res2 = extractJson(task2.text);
         
-        // Verbatim Verification
-        const validatedSuggestions = (res2.suggestions || []).filter((s: Suggestion) => {
-            const verbatim = md.includes(s.anchor_text) && s.original_paragraph.includes(s.anchor_text);
-            if (s.suggestion_type === 'REPLACEMENT') return verbatim;
-            const fresh = !internalUrls.includes(normalizeUrl(s.target_url));
-            return verbatim && fresh;
+        const validated = (res2.suggestions || []).filter((s: Suggestion) => {
+            const exists = md.includes(s.anchor_text);
+            const isFresh = !internalUrls.includes(normalizeUrl(s.target_url));
+            return exists && (s.suggestion_type === 'REPLACEMENT' || isFresh);
+        }).map((s: Suggestion) => {
+            s.nexus_score = (s.information_gain_score * 0.3) + (s.surfer_score * 0.3) + (s.thematic_alignment * 0.2) + (s.connectivity_efficiency * 0.2);
+            return s;
         });
         
-        // Sort by a blended weight of patent heuristics
-        setSuggestions(validatedSuggestions.sort((a, b) => {
-            const scoreA = (a.information_gain_score * 0.4) + (a.surfer_score * 0.4) + (a.thematic_alignment * 0.2);
-            const scoreB = (b.information_gain_score * 0.4) + (b.surfer_score * 0.4) + (b.thematic_alignment * 0.2);
-            return scoreB - scoreA;
-        }));
+        setSuggestions(validated.sort((a, b) => b.nexus_score - a.nexus_score));
 
         const [auditTask, inboundTask] = await Promise.all([
           ai.models.generateContent({
               model: 'gemini-3-flash-preview',
-              contents: `Audit existing links for "Patent Alignment" utility (Gain, Surfer, Theme): ${JSON.stringify(internalLinks)}. JSON: { "audits": [{ "anchor_text", "url", "score", "reasoning", "recommendation" }] }`,
+              contents: `Audit existing links: ${JSON.stringify(internalLinks)}. JSON Format: { "audits": [{ "anchor_text", "url", "score", "reasoning", "recommendation" }] }`,
               config: { responseMimeType: 'application/json' }
           }),
           ai.models.generateContent({
               model: 'gemini-3-flash-preview',
-              contents: `Suggest 5 inventory pages that provide HIGHEST PATENT-ALIGNED VALUE if linking TO "${res1.primary_topic}". JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
+              contents: `Suggest inbound hubs for topic "${res1.primary_topic}". JSON Format: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
               config: { responseMimeType: 'application/json' }
           })
         ]);
         setAudit(extractJson(auditTask.text).audits || []);
         setInbound(extractJson(inboundTask.text).suggestions || []);
     } catch (e) {
-        alert("Strategic analysis failed.");
+        alert("Strategic analysis failed. Ensure API_KEY is valid.");
     } finally { setIsAnalysing(false); }
+  };
+
+  const getImpactLabel = (score: number) => {
+      if (score > 85) return { text: 'CRITICAL BRIDGE', color: 'var(--error-color)' };
+      if (score > 65) return { text: 'STRATEGIC FLOW', color: 'var(--success-color)' };
+      return { text: 'CONTEXTUAL ADD', color: 'var(--primary-color)' };
   };
 
   return (
     <div className="app-container">
       <header className="header">
-        <h1>NexusFlow AI ⚡</h1>
-        <p>Patent-Aligned Site Architecture & Link Equity Optimization</p>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'center', gap:'15px'}}>
+            <h1>NexusFlow AI</h1>
+            <div className="live-badge">SYSTEM READY</div>
+        </div>
+        <p>Architecting Site Authority via Patent-Aligned Topology</p>
       </header>
 
       <div className="progress-indicator">
@@ -366,64 +391,62 @@ const App = () => {
       <div className="content-body">
         {step === 1 && (
           <div className="wizard-step">
-            <h2>1. Source Draft</h2>
-            <div className="radio-group" style={{marginBottom: '1rem'}}>
-                <label className={inputMode === 'fetch' ? 'active' : ''}>
+            <h2>1. Select Source Content</h2>
+            <div className="radio-group" style={{marginBottom: '1rem', display:'flex', gap:'20px'}}>
+                <label className={inputMode === 'fetch' ? 'active-radio' : ''}>
                     <input type="radio" checked={inputMode === 'fetch'} onChange={() => setInputMode('fetch')} /> Fetch URL
                 </label>
-                <label className={inputMode === 'paste' ? 'active' : ''} style={{marginLeft:'20px'}}>
+                <label className={inputMode === 'paste' ? 'active-radio' : ''}>
                     <input type="radio" checked={inputMode === 'paste'} onChange={() => setInputMode('paste')} /> Paste HTML
                 </label>
             </div>
             {inputMode === 'fetch' ? (
                 <div className="input-group">
-                    <input type="text" className="input" placeholder="https://..." value={draftUrl} onChange={e => setDraftUrl(e.target.value)} />
+                    <input type="text" className="input" placeholder="https://example.com/blog/article" value={draftUrl} onChange={e => setDraftUrl(e.target.value)} />
                     <button className="btn btn-primary" onClick={handleFetchDraft} disabled={isProcessingSource}>Scrub</button>
                 </div>
-            ) : <textarea className="input" placeholder="Paste HTML draft..." value={draftInput} onChange={e => setDraftInput(e.target.value)} />}
+            ) : <textarea className="input" placeholder="Paste your draft HTML here..." value={draftInput} onChange={e => setDraftInput(e.target.value)} />}
             {sourceStatus.message && <div className={`status-message ${sourceStatus.type}`}>{sourceStatus.message}</div>}
           </div>
         )}
 
         {step === 2 && (
           <div className="wizard-step">
-            <h2>2. Target Inventory</h2>
-            
+            <h2>2. Target Page Inventory</h2>
             <div className="inventory-grid" style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px'}}>
                 <div className="inv-method">
-                    <label style={{display:'block', marginBottom:'10px', fontWeight:700, fontSize:'0.8rem'}}>METHOD A: XML SITEMAP</label>
+                    <label style={{display:'block', marginBottom:'10px', fontWeight:800, fontSize:'0.75rem', color:'var(--text-muted)'}}>AUTOMATED SCAN</label>
                     <div className="input-group" style={{flexDirection:'column'}}>
-                        <input type="text" className="input" placeholder="https://.../sitemap_index.xml" value={inventoryUrl} onChange={e => setInventoryUrl(e.target.value)} />
-                        <button className="btn btn-secondary" style={{marginTop:'5px'}} onClick={handleFetchInventory} disabled={isProcessingInv}>Recurse XML</button>
+                        <input type="text" className="input" placeholder="sitemap.xml" value={inventoryUrl} onChange={e => setInventoryUrl(e.target.value)} />
+                        <button className="btn btn-secondary" style={{marginTop:'5px', width:'100%'}} onClick={handleFetchInventory} disabled={isProcessingInv}>Recurse Sitemap</button>
                     </div>
                 </div>
                 <div className="inv-method">
-                    <label style={{display:'block', marginBottom:'10px', fontWeight:700, fontSize:'0.8rem'}}>METHOD B: CSV UPLOAD</label>
+                    <label style={{display:'block', marginBottom:'10px', fontWeight:800, fontSize:'0.75rem', color:'var(--text-muted)'}}>MANUAL IMPORT</label>
                     <div className="csv-upload-box" onClick={() => fileInputRef.current?.click()}>
-                        <span>{isProcessingInv ? 'Reading...' : 'Click to Upload CSV'}</span>
+                        <span>{isProcessingInv ? 'Reading...' : 'Drop Article CSV'}</span>
                         <input type="file" ref={fileInputRef} hidden accept=".csv" onChange={handleCsvUpload} />
                     </div>
                 </div>
             </div>
-            <p style={{marginTop:'1.5rem', textAlign:'center', fontSize:'0.9rem', color:'var(--text-muted)'}}>
-                Currently Mapping: <strong>{inventory.length}</strong> strategic endpoints.
+            <p style={{textAlign:'center', marginTop:'1.5rem', fontSize:'0.85rem', color:'var(--text-muted)'}}>
+                Currently mapping: <strong>{inventory.length}</strong> possible destinations.
             </p>
           </div>
         )}
 
         {step === 3 && (
             <div className="wizard-step">
-                <h2>3. Strategic Parameters</h2>
-                <div className="review-box" style={{borderLeftColor:'var(--accent-color)'}}>
-                    <div style={{display:'flex', alignItems:'center', gap:'10px', marginBottom:'10px'}}>
-                        <div style={{width:'10px', height:'10px', borderRadius:'50%', background:'var(--accent-color)'}}></div>
-                        <strong>Multi-Patent Framework Active</strong>
+                <h2>3. Strategy Alignment</h2>
+                <div className="review-box" style={{background:'#f8fafc', padding:'2rem', borderRadius:'20px', border:'2px dashed var(--border-color)'}}>
+                    <p style={{marginBottom:'1rem', fontWeight:600}}>AI will process using the following logic:</p>
+                    <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'10px'}}>
+                        <div className="settings-pill">2D Topology Check: ON</div>
+                        <div className="settings-pill">Info Gain Delta: ON</div>
+                        <div className="settings-pill">Verbatim Anchors: ON</div>
+                        <div className="settings-pill">Reasonable Surfer: ON</div>
                     </div>
-                    <ul style={{fontSize:'0.85rem', color: 'var(--text-muted)', margin: '10px 0'}}>
-                        <li>• <strong>Information Gain:</strong> Ensuring incremental value delta.</li>
-                        <li>• <strong>Reasonable Surfer:</strong> Optimizing for body-click probability.</li>
-                        <li>• <strong>Topic Sensitivity:</strong> Maximizing semantic alignment.</li>
-                    </ul>
+                    <p style={{marginTop:'1.5rem', fontSize:'0.8rem', opacity:0.7}}>This ensures links are mathematically efficient for both users and search crawlers.</p>
                 </div>
             </div>
         )}
@@ -432,86 +455,118 @@ const App = () => {
             <div className="wizard-step">
                 {!isAnalysing && suggestions.length === 0 && (
                     <div style={{textAlign:'center', padding:'3rem'}}>
-                        <button className="btn btn-primary" style={{padding:'1rem 5rem'}} onClick={runAnalysis}>Analyze Equity Flow</button>
+                        <button className="btn btn-primary btn-lg" onClick={runAnalysis}>Run Architecture Audit</button>
                     </div>
                 )}
-                {isAnalysing && <div style={{textAlign:'center', padding:'3rem'}}><span className="spinner"></span><p>Processing patent heuristics...</p></div>}
+                {isAnalysing && <div style={{textAlign:'center', padding:'3rem'}}><span className="spinner"></span><p>Calculating Knowledge Deltas...</p></div>}
 
                 {analysis && !isAnalysing && (
                     <div className="results-container">
                         <div className="strategy-dashboard">
                             <div className="sd-card"><span className="sd-label">Stage</span><div className="sd-value">{analysis.content_stage}</div></div>
-                            <div className="sd-card"><span className="sd-label">Topic</span><div className="sd-value">{analysis.primary_topic}</div></div>
-                            <div className="sd-card"><span className="sd-label">Intent</span><div className="sd-value">{analysis.user_intent}</div></div>
+                            <div className="sd-card"><span className="sd-label">Role</span><div className="sd-value">{analysis.topology_role}</div></div>
+                            <div className="sd-card"><span className="sd-label">Primary Topic</span><div className="sd-value">{analysis.primary_topic}</div></div>
                         </div>
 
                         <div className="tabs-header">
-                            <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>Strategic Bridges ({suggestions.length})</button>
-                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Authority Source ({inbound.length})</button>
-                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Draft Audit ({audit.length})</button>
+                            <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>Outbound Bridges ({suggestions.length})</button>
+                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound Sources ({inbound.length})</button>
+                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Existing Link Audit ({audit.length})</button>
                         </div>
 
                         {activeTab === 'outbound' && (
                             <div className="tab-content">
-                                {suggestions.map((s, i) => (
-                                    <div key={i} className="suggestion-item" style={s.suggestion_type === 'REPLACEMENT' ? {borderLeft: '5px solid var(--warning-color)'} : {}}>
-                                        <div className="suggestion-header">
-                                            <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
-                                                <h3>"{s.anchor_text}"</h3>
-                                                {s.suggestion_type === 'REPLACEMENT' && <span className="badge" style={{background:'var(--warning-color)'}}>REPLACEMENT</span>}
+                                {suggestions.map((s, i) => {
+                                    const impact = getImpactLabel(s.nexus_score);
+                                    return (
+                                        <div key={i} className="nexus-card">
+                                            <div className="nexus-card-left">
+                                                <NexusBadge score={s.nexus_score} />
                                             </div>
-                                            <span className={`badge ${s.target_type === 'MONEY_PAGE' ? 'badge-money' : 'badge-pillar'}`}>{s.target_type}</span>
-                                        </div>
-                                        
-                                        <div className="patent-metrics">
-                                            <div className="metric-pill">
-                                                <span>GAIN</span>
-                                                <div className="metric-bar"><div className="metric-fill" style={{width:`${s.information_gain_score}%`, background:'var(--accent-color)'}}></div></div>
-                                            </div>
-                                            <div className="metric-pill">
-                                                <span>SURFER</span>
-                                                <div className="metric-bar"><div className="metric-fill" style={{width:`${s.surfer_score}%`, background:'var(--success-color)'}}></div></div>
-                                            </div>
-                                            <div className="metric-pill">
-                                                <span>THEME</span>
-                                                <div className="metric-bar"><div className="metric-fill" style={{width:`${s.thematic_alignment}%`, background:'var(--primary-color)'}}></div></div>
-                                            </div>
-                                        </div>
+                                            <div className="nexus-card-main">
+                                                <div className="nexus-card-header">
+                                                    <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
+                                                        <span className="impact-label" style={{color: impact.color, borderColor: impact.color}}>{impact.text}</span>
+                                                        <h3 className="anchor-title">"{s.anchor_text}"</h3>
+                                                    </div>
+                                                    <span className={`badge ${s.target_type === 'MONEY_PAGE' ? 'badge-money' : 'badge-pillar'}`}>{s.target_type.replace('_', ' ')}</span>
+                                                </div>
+                                                
+                                                <div className="nexus-card-body">
+                                                    <div className="nexus-context">
+                                                        <span dangerouslySetInnerHTML={{__html: s.paragraph_with_link}} />
+                                                    </div>
+                                                    <div className="nexus-reason"><strong>Logic:</strong> {s.reasoning}</div>
+                                                    
+                                                    <div className="expert-toggle" onClick={() => setExpandedSuggestion(expandedSuggestion === i ? null : i)}>
+                                                        {expandedSuggestion === i ? '− Hide Heuristics' : '+ View Patent Heuristics'}
+                                                    </div>
 
-                                        <p style={{fontSize:'0.85rem', margin:'1rem 0'}}>Target: <a href={s.target_url} target="_blank">{s.target_url}</a></p>
-                                        
-                                        <div className="suggestion-context">
-                                            <div style={{fontSize:'0.6rem', fontWeight:800, marginBottom:'5px', opacity:0.6}}>VERBATIM BRIDGE:</div>
-                                            <span dangerouslySetInnerHTML={{__html: s.paragraph_with_link}} />
+                                                    {expandedSuggestion === i && (
+                                                        <div className="patent-metrics-simple">
+                                                            <div className="p-metric"><span>Info Gain</span><div className="p-bar"><div className="p-fill" style={{width: `${s.information_gain_score}%`, background: 'var(--accent-color)'}}></div></div></div>
+                                                            <div className="p-metric"><span>Surfer</span><div className="p-bar"><div className="p-fill" style={{width: `${s.surfer_score}%`, background: 'var(--success-color)'}}></div></div></div>
+                                                            <div className="p-metric"><span>Thematic</span><div className="p-bar"><div className="p-fill" style={{width: `${s.thematic_alignment}%`, background: 'var(--primary-color)'}}></div></div></div>
+                                                            <div className="p-metric"><span>Flow</span><div className="p-bar"><div className="p-fill" style={{width: `${s.connectivity_efficiency}%`, background: 'var(--warning-color)'}}></div></div></div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="nexus-card-footer">
+                                                    <span className="target-url-preview">{s.target_url}</span>
+                                                    <button className="btn-copy" onClick={() => {
+                                                        navigator.clipboard.writeText(s.paragraph_with_link.replace(/<\/?[^>]+(>|$)/g, ""));
+                                                        alert('Copied HTML to clipboard');
+                                                    }}>Copy HTML</button>
+                                                </div>
+                                            </div>
                                         </div>
-                                        <div style={{marginTop:'1rem', fontSize:'0.85rem'}}><strong>Strategic Logic:</strong> {s.reasoning}</div>
-                                    </div>
-                                ))}
-                                {suggestions.length === 0 && <p style={{textAlign:'center', color:'var(--text-muted)', padding:'2rem'}}>No strategic bridges found.</p>}
+                                    );
+                                })}
                             </div>
                         )}
 
                         {activeTab === 'inbound' && (
-                             <div className="tab-content">
+                            <div className="tab-content">
                                 {inbound.map((s, i) => (
-                                    <div key={i} className="suggestion-item">
-                                        <div className="suggestion-header"><h3>From: {s.source_page_title}</h3></div>
-                                        <p style={{fontSize:'0.85rem'}}><a href={s.source_page_url} target="_blank">{s.source_page_url}</a></p>
-                                        <div className="suggestion-context">Anchor: "{s.suggested_anchor_text}"<br/>Why: {s.reasoning}</div>
+                                    <div key={i} className="nexus-card">
+                                        <div className="nexus-card-main">
+                                            <div className="nexus-card-header">
+                                                <h3 className="anchor-title">{s.source_page_title}</h3>
+                                                <span className="badge badge-pillar">HUB SOURCE</span>
+                                            </div>
+                                            <div className="nexus-context">
+                                                Use Anchor: <strong>"{s.suggested_anchor_text}"</strong>
+                                            </div>
+                                            <div className="nexus-reason">{s.reasoning}</div>
+                                            <div className="nexus-card-footer">
+                                                <span className="target-url-preview">{s.source_page_url}</span>
+                                            </div>
+                                        </div>
                                     </div>
                                 ))}
-                             </div>
+                            </div>
                         )}
 
                         {activeTab === 'audit' && (
-                             <div className="tab-content">
+                            <div className="tab-content">
                                 {audit.map((a, i) => (
-                                    <div key={i} className="suggestion-item">
-                                        <div className="suggestion-header"><h3>"{a.anchor_text}"</h3><span>{a.score}% Utility</span></div>
-                                        <div className="suggestion-context">{a.recommendation}</div>
+                                    <div key={i} className="nexus-card">
+                                        <div className="nexus-card-left">
+                                            <NexusBadge score={a.score} />
+                                        </div>
+                                        <div className="nexus-card-main">
+                                            <div className="nexus-card-header">
+                                                <h3 className="anchor-title">"{a.anchor_text}"</h3>
+                                            </div>
+                                            <div className="nexus-reason">{a.reasoning}</div>
+                                            <div className="nexus-context"><strong>Recommendation:</strong> {a.recommendation}</div>
+                                            <div className="nexus-card-footer">
+                                                <span className="target-url-preview">{a.url}</span>
+                                            </div>
+                                        </div>
                                     </div>
                                 ))}
-                             </div>
+                            </div>
                         )}
                     </div>
                 )}
