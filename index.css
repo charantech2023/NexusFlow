@@ -74,10 +74,16 @@ textarea.input { min-height: 200px; font-family: 'Inter', sans-serif; }
 .tab-btn { background: none; border: none; padding: 1rem 0; cursor: pointer; color: var(--text-muted); border-bottom: 3px solid transparent; font-weight: 700; transition: all 0.2s; }
 .tab-btn.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
 
-.suggestion-item { border: 1px solid var(--border-color); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+.suggestion-item { border: 1px solid var(--border-color); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05); position: relative; }
 .suggestion-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 .suggestion-context { background: #f8fafc; padding: 1.2rem; border-radius: 8px; border-left: 5px solid var(--accent-color); font-size: 0.9rem; line-height: 1.7; color: #475569; }
 .suggestion-context a { color: var(--primary-color); font-weight: 700; text-decoration: underline; }
+
+.patent-metrics { display: flex; gap: 15px; background: #f1f5f9; padding: 10px; border-radius: 8px; margin-bottom: 1rem; }
+.metric-pill { flex: 1; }
+.metric-pill span { font-size: 0.55rem; font-weight: 800; color: var(--text-muted); display: block; margin-bottom: 4px; }
+.metric-bar { height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden; }
+.metric-fill { height: 100%; transition: width 0.5s ease; }
 
 .review-box { padding: 1.5rem; background: #fafafa; border-radius: 10px; border-left: 5px solid #ddd; }
 .badge { padding: 5px 10px; border-radius: 6px; font-size: 0.65rem; font-weight: 800; text-transform: uppercase; color: white; display: inline-block; }

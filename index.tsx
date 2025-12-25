@@ -31,7 +31,9 @@ interface Suggestion {
     paragraph_with_link: string;
     reasoning: string;
     strategy_tag: string;
-    information_gain_score?: number; // New: 0-100 score for incremental value
+    information_gain_score: number; // Patent 10,642,897
+    surfer_score: number;           // Patent 7,716,216 (Reasonable Surfer)
+    thematic_alignment: number;      // Patent 6,799,176 (Topic-Sensitive)
 }
 
 interface ExistingLinkAudit {
@@ -290,25 +292,23 @@ const App = () => {
 
         const task2 = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: `TASK: Identify HIGH INFORMATION GAIN internal links.
+            contents: `TASK: Identify HIGH INFORMATION GAIN & SURFER-VALIDATED internal links.
             TOPIC: ${res1.primary_topic}
             STAGE: ${res1.content_stage}
-            EXISTING_LINKS: ${JSON.stringify(internalLinks)}
             INVENTORY: ${JSON.stringify(sampledInventory)}
             CONTENT:
             ${md}
 
-            CONCEPTS:
-            - Information Gain: The incremental knowledge a user gains by clicking.
-            - Delta: If the target page repeats the paragraph's info, gain is 0. If it provides a deep dive, solution, or next logical step, gain is 100.
+            PATENT-ALIGNED HEURISTICS:
+            1. Information Gain (10,642,897): Priority to links providing additive data delta.
+            2. Reasonable Surfer (7,716,216): Body links near section starts are high-value. 
+            3. Thematic Alignment (6,799,176): Match intent and semantic proximity.
 
             STRICT RULES:
-            1. DO NOT MODIFY BODY TEXT. Use VERBATIM substrings for "anchor_text".
-            2. Suggestion Type 'NEW': Find high-gain bridges that aren't currently linked.
-            3. Suggestion Type 'REPLACEMENT': Identify generic anchors (e.g. "click here") and suggest a high-gain verbatim replacement within the same block.
-            4. Rank each by "information_gain_score" (0-100).
+            1. DO NOT MODIFY BODY TEXT. Use VERBATIM substrings.
+            2. Rank each by: information_gain_score, surfer_score (click probability), thematic_alignment.
 
-            Return JSON: { "suggestions": [{ "suggestion_type", "anchor_text", "original_anchor" (optional), "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "information_gain_score" }] }`,
+            Return JSON: { "suggestions": [{ "suggestion_type", "anchor_text", "original_anchor" (optional), "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "information_gain_score", "surfer_score", "thematic_alignment" }] }`,
             config: { responseMimeType: 'application/json' }
         });
         const res2 = extractJson(task2.text);
@@ -320,17 +320,23 @@ const App = () => {
             const fresh = !internalUrls.includes(normalizeUrl(s.target_url));
             return verbatim && fresh;
         });
-        setSuggestions(validatedSuggestions.sort((a, b) => (b.information_gain_score || 0) - (a.information_gain_score || 0)));
+        
+        // Sort by a blended weight of patent heuristics
+        setSuggestions(validatedSuggestions.sort((a, b) => {
+            const scoreA = (a.information_gain_score * 0.4) + (a.surfer_score * 0.4) + (a.thematic_alignment * 0.2);
+            const scoreB = (b.information_gain_score * 0.4) + (b.surfer_score * 0.4) + (b.thematic_alignment * 0.2);
+            return scoreB - scoreA;
+        }));
 
         const [auditTask, inboundTask] = await Promise.all([
           ai.models.generateContent({
               model: 'gemini-3-flash-preview',
-              contents: `Audit existing links for "Information Gain" utility: ${JSON.stringify(internalLinks)}. JSON: { "audits": [{ "anchor_text", "url", "score", "reasoning", "recommendation" }] }`,
+              contents: `Audit existing links for "Patent Alignment" utility (Gain, Surfer, Theme): ${JSON.stringify(internalLinks)}. JSON: { "audits": [{ "anchor_text", "url", "score", "reasoning", "recommendation" }] }`,
               config: { responseMimeType: 'application/json' }
           }),
           ai.models.generateContent({
               model: 'gemini-3-flash-preview',
-              contents: `Suggest 5 inventory pages that provide HIGH INFORMATION GAIN if linking TO "${res1.primary_topic}". JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
+              contents: `Suggest 5 inventory pages that provide HIGHEST PATENT-ALIGNED VALUE if linking TO "${res1.primary_topic}". JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
               config: { responseMimeType: 'application/json' }
           })
         ]);
@@ -345,7 +351,7 @@ const App = () => {
     <div className="app-container">
       <header className="header">
         <h1>NexusFlow AI ⚡</h1>
-        <p>Information Gain Architecture & Journey Framework</p>
+        <p>Patent-Aligned Site Architecture & Link Equity Optimization</p>
       </header>
 
       <div className="progress-indicator">
@@ -400,7 +406,7 @@ const App = () => {
                 </div>
             </div>
             <p style={{marginTop:'1.5rem', textAlign:'center', fontSize:'0.9rem', color:'var(--text-muted)'}}>
-                Currently Mapping: <strong>{inventory.length}</strong> potential journey endpoints.
+                Currently Mapping: <strong>{inventory.length}</strong> strategic endpoints.
             </p>
           </div>
         )}
@@ -411,11 +417,13 @@ const App = () => {
                 <div className="review-box" style={{borderLeftColor:'var(--accent-color)'}}>
                     <div style={{display:'flex', alignItems:'center', gap:'10px', marginBottom:'10px'}}>
                         <div style={{width:'10px', height:'10px', borderRadius:'50%', background:'var(--accent-color)'}}></div>
-                        <strong>Contextual Information Gain Enabled</strong>
+                        <strong>Multi-Patent Framework Active</strong>
                     </div>
-                    <p style={{fontSize:'0.9rem'}}>
-                        The engine will now calculate the <strong>Information Delta</strong>. We prioritize links where the destination provides significant new value/knowledge relative to the source paragraph.
-                    </p>
+                    <ul style={{fontSize:'0.85rem', color: 'var(--text-muted)', margin: '10px 0'}}>
+                        <li>• <strong>Information Gain:</strong> Ensuring incremental value delta.</li>
+                        <li>• <strong>Reasonable Surfer:</strong> Optimizing for body-click probability.</li>
+                        <li>• <strong>Topic Sensitivity:</strong> Maximizing semantic alignment.</li>
+                    </ul>
                 </div>
             </div>
         )}
@@ -424,10 +432,10 @@ const App = () => {
             <div className="wizard-step">
                 {!isAnalysing && suggestions.length === 0 && (
                     <div style={{textAlign:'center', padding:'3rem'}}>
-                        <button className="btn btn-primary" style={{padding:'1rem 5rem'}} onClick={runAnalysis}>Analyze Information Flow</button>
+                        <button className="btn btn-primary" style={{padding:'1rem 5rem'}} onClick={runAnalysis}>Analyze Equity Flow</button>
                     </div>
                 )}
-                {isAnalysing && <div style={{textAlign:'center', padding:'3rem'}}><span className="spinner"></span><p>Estimating link information gain...</p></div>}
+                {isAnalysing && <div style={{textAlign:'center', padding:'3rem'}}><span className="spinner"></span><p>Processing patent heuristics...</p></div>}
 
                 {analysis && !isAnalysing && (
                     <div className="results-container">
@@ -438,9 +446,9 @@ const App = () => {
                         </div>
 
                         <div className="tabs-header">
-                            <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>High-Gain Bridges ({suggestions.length})</button>
-                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound Value ({inbound.length})</button>
-                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Current Link Utility ({audit.length})</button>
+                            <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>Strategic Bridges ({suggestions.length})</button>
+                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Authority Source ({inbound.length})</button>
+                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Draft Audit ({audit.length})</button>
                         </div>
 
                         {activeTab === 'outbound' && (
@@ -450,35 +458,36 @@ const App = () => {
                                         <div className="suggestion-header">
                                             <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
                                                 <h3>"{s.anchor_text}"</h3>
-                                                {s.information_gain_score && (
-                                                    <span className="badge" style={{background: s.information_gain_score > 80 ? 'var(--success-color)' : 'var(--secondary-color)', fontSize:'0.6rem'}}>
-                                                        GAIN: {s.information_gain_score}%
-                                                    </span>
-                                                )}
-                                                {s.suggestion_type === 'REPLACEMENT' && <span className="badge" style={{background:'var(--warning-color)'}}>UPGRADE</span>}
+                                                {s.suggestion_type === 'REPLACEMENT' && <span className="badge" style={{background:'var(--warning-color)'}}>REPLACEMENT</span>}
                                             </div>
                                             <span className={`badge ${s.target_type === 'MONEY_PAGE' ? 'badge-money' : 'badge-pillar'}`}>{s.target_type}</span>
                                         </div>
                                         
-                                        {s.suggestion_type === 'REPLACEMENT' && (
-                                            <div style={{marginBottom: '1rem', padding: '0.8rem', background: '#fffbeb', borderRadius: '8px', border: '1px solid #fde68a'}}>
-                                                <div style={{fontSize:'0.7rem', fontWeight:800, color:'#b45309', marginBottom:'4px'}}>SUBOPTIMAL ORIGINAL:</div>
-                                                <div style={{fontSize:'0.85rem', color:'#92400e'}}>
-                                                    Anchor: <span style={{fontWeight:600}}>"{s.original_anchor}"</span> (Low Informational Value)
-                                                </div>
+                                        <div className="patent-metrics">
+                                            <div className="metric-pill">
+                                                <span>GAIN</span>
+                                                <div className="metric-bar"><div className="metric-fill" style={{width:`${s.information_gain_score}%`, background:'var(--accent-color)'}}></div></div>
                                             </div>
-                                        )}
+                                            <div className="metric-pill">
+                                                <span>SURFER</span>
+                                                <div className="metric-bar"><div className="metric-fill" style={{width:`${s.surfer_score}%`, background:'var(--success-color)'}}></div></div>
+                                            </div>
+                                            <div className="metric-pill">
+                                                <span>THEME</span>
+                                                <div className="metric-bar"><div className="metric-fill" style={{width:`${s.thematic_alignment}%`, background:'var(--primary-color)'}}></div></div>
+                                            </div>
+                                        </div>
 
-                                        <p style={{fontSize:'0.85rem', marginBottom:'10px'}}>Target: <a href={s.target_url} target="_blank">{s.target_url}</a></p>
+                                        <p style={{fontSize:'0.85rem', margin:'1rem 0'}}>Target: <a href={s.target_url} target="_blank">{s.target_url}</a></p>
                                         
                                         <div className="suggestion-context">
-                                            <div style={{fontSize:'0.6rem', fontWeight:800, marginBottom:'5px', opacity:0.6}}>VERBATIM FLOW:</div>
+                                            <div style={{fontSize:'0.6rem', fontWeight:800, marginBottom:'5px', opacity:0.6}}>VERBATIM BRIDGE:</div>
                                             <span dangerouslySetInnerHTML={{__html: s.paragraph_with_link}} />
                                         </div>
-                                        <div style={{marginTop:'1rem', fontSize:'0.85rem'}}><strong>Delta Strategy:</strong> {s.reasoning}</div>
+                                        <div style={{marginTop:'1rem', fontSize:'0.85rem'}}><strong>Strategic Logic:</strong> {s.reasoning}</div>
                                     </div>
                                 ))}
-                                {suggestions.length === 0 && <p style={{textAlign:'center', color:'var(--text-muted)', padding:'2rem'}}>No high-gain bridges found.</p>}
+                                {suggestions.length === 0 && <p style={{textAlign:'center', color:'var(--text-muted)', padding:'2rem'}}>No strategic bridges found.</p>}
                             </div>
                         )}
 
