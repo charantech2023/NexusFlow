@@ -24,12 +24,14 @@ interface AnalysisResult {
 interface Suggestion {
     suggestion_type: 'NEW' | 'REPLACEMENT';
     anchor_text: string;
+    original_anchor?: string;
     target_url: string;
     target_type: 'MONEY_PAGE' | 'STRATEGIC_PILLAR' | 'STANDARD_CONTENT';
     original_paragraph: string;
     paragraph_with_link: string;
     reasoning: string;
     strategy_tag: string;
+    information_gain_score?: number; // New: 0-100 score for incremental value
 }
 
 interface ExistingLinkAudit {
@@ -288,15 +290,25 @@ const App = () => {
 
         const task2 = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: `TASK: Find natural "Bridge" anchors.
+            contents: `TASK: Identify HIGH INFORMATION GAIN internal links.
+            TOPIC: ${res1.primary_topic}
             STAGE: ${res1.content_stage}
+            EXISTING_LINKS: ${JSON.stringify(internalLinks)}
             INVENTORY: ${JSON.stringify(sampledInventory)}
             CONTENT:
             ${md}
+
+            CONCEPTS:
+            - Information Gain: The incremental knowledge a user gains by clicking.
+            - Delta: If the target page repeats the paragraph's info, gain is 0. If it provides a deep dive, solution, or next logical step, gain is 100.
+
             STRICT RULES:
-            1. DO NOT MODIFY THE TEXT. The "anchor_text" MUST be a verbatim character match in "original_paragraph".
-            2. Link to Decision pages if stage is Decision.
-            Return JSON: { "suggestions": [{ "anchor_text", "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "strategy_tag" }] }`,
+            1. DO NOT MODIFY BODY TEXT. Use VERBATIM substrings for "anchor_text".
+            2. Suggestion Type 'NEW': Find high-gain bridges that aren't currently linked.
+            3. Suggestion Type 'REPLACEMENT': Identify generic anchors (e.g. "click here") and suggest a high-gain verbatim replacement within the same block.
+            4. Rank each by "information_gain_score" (0-100).
+
+            Return JSON: { "suggestions": [{ "suggestion_type", "anchor_text", "original_anchor" (optional), "target_url", "target_type", "original_paragraph", "paragraph_with_link", "reasoning", "information_gain_score" }] }`,
             config: { responseMimeType: 'application/json' }
         });
         const res2 = extractJson(task2.text);
@@ -304,20 +316,21 @@ const App = () => {
         // Verbatim Verification
         const validatedSuggestions = (res2.suggestions || []).filter((s: Suggestion) => {
             const verbatim = md.includes(s.anchor_text) && s.original_paragraph.includes(s.anchor_text);
+            if (s.suggestion_type === 'REPLACEMENT') return verbatim;
             const fresh = !internalUrls.includes(normalizeUrl(s.target_url));
             return verbatim && fresh;
         });
-        setSuggestions(validatedSuggestions);
+        setSuggestions(validatedSuggestions.sort((a, b) => (b.information_gain_score || 0) - (a.information_gain_score || 0)));
 
         const [auditTask, inboundTask] = await Promise.all([
           ai.models.generateContent({
               model: 'gemini-3-flash-preview',
-              contents: `Audit internal links in "${res1.primary_topic}": ${JSON.stringify(internalLinks)}. JSON: { "audits": [{ "anchor_text", "url", "score", "reasoning", "recommendation" }] }`,
+              contents: `Audit existing links for "Information Gain" utility: ${JSON.stringify(internalLinks)}. JSON: { "audits": [{ "anchor_text", "url", "score", "reasoning", "recommendation" }] }`,
               config: { responseMimeType: 'application/json' }
           }),
           ai.models.generateContent({
               model: 'gemini-3-flash-preview',
-              contents: `Suggest 5 inventory pages to link TO "${res1.primary_topic}". Pool: ${JSON.stringify(sampledInventory)}. JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
+              contents: `Suggest 5 inventory pages that provide HIGH INFORMATION GAIN if linking TO "${res1.primary_topic}". JSON: { "suggestions": [{ "source_page_title", "source_page_url", "reasoning", "suggested_anchor_text" }] }`,
               config: { responseMimeType: 'application/json' }
           })
         ]);
@@ -332,7 +345,7 @@ const App = () => {
     <div className="app-container">
       <header className="header">
         <h1>NexusFlow AI ⚡</h1>
-        <p>Enterprise Site Architecture & Journey Optimization</p>
+        <p>Information Gain Architecture & Journey Framework</p>
       </header>
 
       <div className="progress-indicator">
@@ -381,23 +394,28 @@ const App = () => {
                 <div className="inv-method">
                     <label style={{display:'block', marginBottom:'10px', fontWeight:700, fontSize:'0.8rem'}}>METHOD B: CSV UPLOAD</label>
                     <div className="csv-upload-box" onClick={() => fileInputRef.current?.click()}>
-                        <span>{isProcessingInv ? 'Reading...' : 'Click to Upload CSV (URL, Title)'}</span>
+                        <span>{isProcessingInv ? 'Reading...' : 'Click to Upload CSV'}</span>
                         <input type="file" ref={fileInputRef} hidden accept=".csv" onChange={handleCsvUpload} />
                     </div>
                 </div>
             </div>
             <p style={{marginTop:'1.5rem', textAlign:'center', fontSize:'0.9rem', color:'var(--text-muted)'}}>
-                Currently Mapping: <strong>{inventory.length}</strong> strategic pages.
+                Currently Mapping: <strong>{inventory.length}</strong> potential journey endpoints.
             </p>
           </div>
         )}
 
         {step === 3 && (
             <div className="wizard-step">
-                <h2>3. Strategy Guardrails</h2>
-                <div className="review-box" style={{borderLeftColor:'var(--success-color)'}}>
-                    <strong>Active Protocol: Bridge Anchor Logic</strong>
-                    <p style={{marginTop:'10px'}}>We scan your draft for verbatim phrases that naturally link to target inventory. No text is rewritten or "hallucinated."</p>
+                <h2>3. Strategic Parameters</h2>
+                <div className="review-box" style={{borderLeftColor:'var(--accent-color)'}}>
+                    <div style={{display:'flex', alignItems:'center', gap:'10px', marginBottom:'10px'}}>
+                        <div style={{width:'10px', height:'10px', borderRadius:'50%', background:'var(--accent-color)'}}></div>
+                        <strong>Contextual Information Gain Enabled</strong>
+                    </div>
+                    <p style={{fontSize:'0.9rem'}}>
+                        The engine will now calculate the <strong>Information Delta</strong>. We prioritize links where the destination provides significant new value/knowledge relative to the source paragraph.
+                    </p>
                 </div>
             </div>
         )}
@@ -406,41 +424,61 @@ const App = () => {
             <div className="wizard-step">
                 {!isAnalysing && suggestions.length === 0 && (
                     <div style={{textAlign:'center', padding:'3rem'}}>
-                        <button className="btn btn-primary" style={{padding:'1rem 5rem'}} onClick={runAnalysis}>Run Strategic Analysis</button>
+                        <button className="btn btn-primary" style={{padding:'1rem 5rem'}} onClick={runAnalysis}>Analyze Information Flow</button>
                     </div>
                 )}
-                {isAnalysing && <div style={{textAlign:'center', padding:'3rem'}}><span className="spinner"></span><p>Architecting journey paths...</p></div>}
+                {isAnalysing && <div style={{textAlign:'center', padding:'3rem'}}><span className="spinner"></span><p>Estimating link information gain...</p></div>}
 
                 {analysis && !isAnalysing && (
                     <div className="results-container">
                         <div className="strategy-dashboard">
                             <div className="sd-card"><span className="sd-label">Stage</span><div className="sd-value">{analysis.content_stage}</div></div>
                             <div className="sd-card"><span className="sd-label">Topic</span><div className="sd-value">{analysis.primary_topic}</div></div>
-                            <div className="sd-card"><span className="sd-label">Entities</span><div className="sd-value" style={{fontSize:'0.75rem'}}>{analysis.key_entities.join(', ')}</div></div>
+                            <div className="sd-card"><span className="sd-label">Intent</span><div className="sd-value">{analysis.user_intent}</div></div>
                         </div>
 
                         <div className="tabs-header">
-                            <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>Strategic Bridges ({suggestions.length})</button>
-                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound Sources ({inbound.length})</button>
-                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Draft Health ({audit.length})</button>
+                            <button className={`tab-btn ${activeTab === 'outbound' ? 'active' : ''}`} onClick={() => setActiveTab('outbound')}>High-Gain Bridges ({suggestions.length})</button>
+                            <button className={`tab-btn ${activeTab === 'inbound' ? 'active' : ''}`} onClick={() => setActiveTab('inbound')}>Inbound Value ({inbound.length})</button>
+                            <button className={`tab-btn ${activeTab === 'audit' ? 'active' : ''}`} onClick={() => setActiveTab('audit')}>Current Link Utility ({audit.length})</button>
                         </div>
 
                         {activeTab === 'outbound' && (
                             <div className="tab-content">
                                 {suggestions.map((s, i) => (
-                                    <div key={i} className="suggestion-item">
+                                    <div key={i} className="suggestion-item" style={s.suggestion_type === 'REPLACEMENT' ? {borderLeft: '5px solid var(--warning-color)'} : {}}>
                                         <div className="suggestion-header">
-                                            <h3>"{s.anchor_text}"</h3>
+                                            <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
+                                                <h3>"{s.anchor_text}"</h3>
+                                                {s.information_gain_score && (
+                                                    <span className="badge" style={{background: s.information_gain_score > 80 ? 'var(--success-color)' : 'var(--secondary-color)', fontSize:'0.6rem'}}>
+                                                        GAIN: {s.information_gain_score}%
+                                                    </span>
+                                                )}
+                                                {s.suggestion_type === 'REPLACEMENT' && <span className="badge" style={{background:'var(--warning-color)'}}>UPGRADE</span>}
+                                            </div>
                                             <span className={`badge ${s.target_type === 'MONEY_PAGE' ? 'badge-money' : 'badge-pillar'}`}>{s.target_type}</span>
                                         </div>
+                                        
+                                        {s.suggestion_type === 'REPLACEMENT' && (
+                                            <div style={{marginBottom: '1rem', padding: '0.8rem', background: '#fffbeb', borderRadius: '8px', border: '1px solid #fde68a'}}>
+                                                <div style={{fontSize:'0.7rem', fontWeight:800, color:'#b45309', marginBottom:'4px'}}>SUBOPTIMAL ORIGINAL:</div>
+                                                <div style={{fontSize:'0.85rem', color:'#92400e'}}>
+                                                    Anchor: <span style={{fontWeight:600}}>"{s.original_anchor}"</span> (Low Informational Value)
+                                                </div>
+                                            </div>
+                                        )}
+
                                         <p style={{fontSize:'0.85rem', marginBottom:'10px'}}>Target: <a href={s.target_url} target="_blank">{s.target_url}</a></p>
+                                        
                                         <div className="suggestion-context">
-                                            <div style={{fontSize:'0.6rem', fontWeight:800, marginBottom:'5px', opacity:0.6}}>VERBATIM CONTEXT:</div>
+                                            <div style={{fontSize:'0.6rem', fontWeight:800, marginBottom:'5px', opacity:0.6}}>VERBATIM FLOW:</div>
                                             <span dangerouslySetInnerHTML={{__html: s.paragraph_with_link}} />
                                         </div>
-                                        <div style={{marginTop:'1rem', fontSize:'0.85rem'}}><strong>Logic:</strong> {s.reasoning}</div>
+                                        <div style={{marginTop:'1rem', fontSize:'0.85rem'}}><strong>Delta Strategy:</strong> {s.reasoning}</div>
                                     </div>
                                 ))}
+                                {suggestions.length === 0 && <p style={{textAlign:'center', color:'var(--text-muted)', padding:'2rem'}}>No high-gain bridges found.</p>}
                             </div>
                         )}
 
@@ -460,7 +498,7 @@ const App = () => {
                              <div className="tab-content">
                                 {audit.map((a, i) => (
                                     <div key={i} className="suggestion-item">
-                                        <div className="suggestion-header"><h3>"{a.anchor_text}"</h3><span>{a.score}% Quality</span></div>
+                                        <div className="suggestion-header"><h3>"{a.anchor_text}"</h3><span>{a.score}% Utility</span></div>
                                         <div className="suggestion-context">{a.recommendation}</div>
                                     </div>
                                 ))}
