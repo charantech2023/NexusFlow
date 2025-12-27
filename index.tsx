@@ -92,7 +92,7 @@ const fetchWithProxyFallbacks = async (url: string): Promise<Response> => {
             if (response.ok) return response;
         } catch (e) { lastError = e; }
     }
-    throw new Error(lastError ? `CORS/Proxy Error. Try "Paste HTML" mode instead.` : "Fetch failed.");
+    throw new Error(lastError ? `CORS/Proxy Error. Try Firecrawl or "Paste HTML" mode.` : "Fetch failed.");
 };
 
 const getHostname = (urlString: string): string => {
@@ -200,6 +200,8 @@ const App = () => {
   const [sourceStatus, setSourceStatus] = useState({ message: '', type: '' });
   
   const [inventoryUrl, setInventoryUrl] = useState('');
+  // Use the environment variable as the default value for the Firecrawl key
+  const [firecrawlKey, setFirecrawlKey] = useState(process.env.FIRECRAWL_API_KEY || '');
   const [inventory, setInventory] = useState<ParsedArticle[]>([]);
   const [isProcessingInv, setIsProcessingInv] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -221,7 +223,26 @@ const App = () => {
     if (!draftUrl) return;
     setIsProcessingSource(true);
     setSourceStatus({ message: 'Initializing scrub...', type: 'info' });
+    
     try {
+      if (firecrawlKey) {
+        setSourceStatus({ message: 'Scraping with Firecrawl...', type: 'info' });
+        const res = await fetch('https://api.firecrawl.dev/v1/scrape', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${firecrawlKey}`
+          },
+          body: JSON.stringify({ url: draftUrl, formats: ["markdown", "html"] })
+        });
+        const data = await res.json();
+        if (data.success) {
+          setDraftHtml(data.data.html || data.data.markdown);
+          setSourceStatus({ message: 'Firecrawl scrape successful.', type: 'success' });
+          return;
+        }
+      }
+      
       const res = await fetchWithProxyFallbacks(draftUrl);
       const html = await res.text();
       setDraftHtml(html);
@@ -229,6 +250,36 @@ const App = () => {
     } catch (e) {
       setSourceStatus({ message: (e as Error).message, type: 'error' });
     } finally { setIsProcessingSource(false); }
+  };
+
+  const handleFirecrawlMap = async () => {
+    if (!inventoryUrl || !firecrawlKey) return;
+    setIsProcessingInv(true);
+    try {
+        const res = await fetch('https://api.firecrawl.dev/v1/map', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${firecrawlKey}`
+            },
+            body: JSON.stringify({ url: inventoryUrl })
+        });
+        const data = await res.json();
+        if (data.success && data.links) {
+            const items = data.links.map((u: string) => ({ 
+                url: u, 
+                title: u.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') || u, 
+                type: 'CONTENT' 
+            }));
+            setInventory(items);
+            localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(items));
+            alert(`Firecrawl discovered ${items.length} nodes via deep mapping.`);
+        } else {
+            throw new Error(data.error || 'Map failed');
+        }
+    } catch (e) {
+        alert("Firecrawl Map failed. Check your API key.");
+    } finally { setIsProcessingInv(false); }
   };
 
   const handleFetchInventory = async () => {
@@ -262,8 +313,8 @@ const App = () => {
         }));
         setInventory(items);
         localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(items));
-        alert(`Discovered ${items.length} nodes.`);
-    } catch (e) { alert("Sitemap scan failed. Try CSV upload."); }
+        alert(`Discovered ${items.length} nodes via sitemap.`);
+    } catch (e) { alert("Sitemap scan failed. Try Firecrawl Map."); }
     finally { setIsProcessingInv(false); }
   };
 
@@ -392,6 +443,16 @@ const App = () => {
         {step === 1 && (
           <div className="wizard-step">
             <h2>1. Select Source Content</h2>
+            <div className="firecrawl-optional" style={{marginBottom:'1rem'}}>
+                <input 
+                    type="password" 
+                    className="input input-sm" 
+                    placeholder={process.env.FIRECRAWL_API_KEY ? "Firecrawl Key Active (Enter new to override)" : "Firecrawl API Key (Optional for better scraping)"} 
+                    value={firecrawlKey} 
+                    onChange={e => setFirecrawlKey(e.target.value)} 
+                    style={{fontSize:'0.8rem', padding:'0.6rem'}}
+                />
+            </div>
             <div className="radio-group" style={{marginBottom: '1rem', display:'flex', gap:'20px'}}>
                 <label className={inputMode === 'fetch' ? 'active-radio' : ''}>
                     <input type="radio" checked={inputMode === 'fetch'} onChange={() => setInputMode('fetch')} /> Fetch URL
@@ -415,10 +476,13 @@ const App = () => {
             <h2>2. Target Page Inventory</h2>
             <div className="inventory-grid" style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px'}}>
                 <div className="inv-method">
-                    <label style={{display:'block', marginBottom:'10px', fontWeight:800, fontSize:'0.75rem', color:'var(--text-muted)'}}>AUTOMATED SCAN</label>
+                    <label style={{display:'block', marginBottom:'10px', fontWeight:800, fontSize:'0.75rem', color:'var(--text-muted)'}}>URL DISCOVERY</label>
                     <div className="input-group" style={{flexDirection:'column'}}>
-                        <input type="text" className="input" placeholder="sitemap.xml" value={inventoryUrl} onChange={e => setInventoryUrl(e.target.value)} />
-                        <button className="btn btn-secondary" style={{marginTop:'5px', width:'100%'}} onClick={handleFetchInventory} disabled={isProcessingInv}>Recurse Sitemap</button>
+                        <input type="text" className="input" placeholder="Domain or Sitemap URL" value={inventoryUrl} onChange={e => setInventoryUrl(e.target.value)} />
+                        <div style={{display:'flex', gap:'5px', marginTop:'5px'}}>
+                            <button className="btn btn-secondary" style={{flex:1, fontSize:'0.7rem'}} onClick={handleFetchInventory} disabled={isProcessingInv}>Sitemap Scan</button>
+                            <button className="btn btn-firecrawl" style={{flex:1, fontSize:'0.7rem'}} onClick={handleFirecrawlMap} disabled={isProcessingInv || !firecrawlKey}>Firecrawl Map</button>
+                        </div>
                     </div>
                 </div>
                 <div className="inv-method">
@@ -429,6 +493,7 @@ const App = () => {
                     </div>
                 </div>
             </div>
+            {!firecrawlKey && <div className="hint-text" style={{marginTop:'10px', fontSize:'0.75rem', color:'var(--warning-color)'}}>Add Firecrawl Key in Step 1 for deep site mapping.</div>}
             <p style={{textAlign:'center', marginTop:'1.5rem', fontSize:'0.85rem', color:'var(--text-muted)'}}>
                 Currently mapping: <strong>{inventory.length}</strong> possible destinations.
             </p>
