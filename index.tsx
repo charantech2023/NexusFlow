@@ -123,7 +123,7 @@ const extractJson = (text: string) => {
         return JSON.parse(jsonText.substring(start, end + 1));
     } catch (e) {
         console.error("JSON Parse Error:", e, text);
-        return { suggestions: [], audits: [] };
+        return { suggestions: [], audits: [], inventory: [] };
     }
 };
 
@@ -200,7 +200,6 @@ const App = () => {
   const [sourceStatus, setSourceStatus] = useState({ message: '', type: '' });
   
   const [inventoryUrl, setInventoryUrl] = useState('');
-  // Use the environment variable as the default value for the Firecrawl key
   const [firecrawlKey, setFirecrawlKey] = useState(process.env.FIRECRAWL_API_KEY || '');
   const [inventory, setInventory] = useState<ParsedArticle[]>([]);
   const [isProcessingInv, setIsProcessingInv] = useState(false);
@@ -271,14 +270,52 @@ const App = () => {
                 title: u.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') || u, 
                 type: 'CONTENT' 
             }));
-            setInventory(items);
-            localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(items));
+            const updated = [...inventory, ...items].filter((v, i, a) => a.findIndex(t => t.url === v.url) === i);
+            setInventory(updated);
+            localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(updated));
             alert(`Firecrawl discovered ${items.length} nodes via deep mapping.`);
         } else {
             throw new Error(data.error || 'Map failed');
         }
     } catch (e) {
         alert("Firecrawl Map failed. Check your API key.");
+    } finally { setIsProcessingInv(false); }
+  };
+
+  const handleSearchDiscovery = async () => {
+    if (!inventoryUrl) return;
+    setIsProcessingInv(true);
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const domain = getHostname(inventoryUrl);
+
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: `Using Google Search, identify the top 10 most common "People Also Ask" questions and related search topics for the domain or topic: ${inventoryUrl}. 
+            For each question/topic, suggest a strategic page title and a hypothetical (but logically sound) URL path that would exist on this domain to answer it.
+            JSON Format: { "inventory": [{ "title": "...", "url": "...", "type": "CONTENT" }] }`,
+            config: {
+                tools: [{ googleSearch: {} }],
+                responseMimeType: 'application/json'
+            },
+        });
+
+        const res = extractJson(response.text);
+        if (res.inventory && res.inventory.length > 0) {
+            const items = res.inventory.map((item: any) => ({
+                ...item,
+                url: item.url.startsWith('http') ? item.url : `https://${domain}${item.url.startsWith('/') ? '' : '/'}${item.url}`
+            }));
+            const updated = [...inventory, ...items].filter((v, i, a) => a.findIndex(t => t.url === v.url) === i);
+            setInventory(updated);
+            localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(updated));
+            alert(`AI Search Grounding identified ${items.length} high-intent PAA opportunities.`);
+        } else {
+            alert("No significant PAA opportunities found for this domain.");
+        }
+    } catch (e) {
+        console.error(e);
+        alert("Search Grounding Discovery failed. Ensure API_KEY supports search grounding.");
     } finally { setIsProcessingInv(false); }
   };
 
@@ -311,10 +348,11 @@ const App = () => {
         const items = Array.from(discoveredUrls).map(u => ({ 
             url: u, title: u.split('/').filter(Boolean).pop()?.replace(/-/g, ' ') || u, type: 'CONTENT' 
         }));
-        setInventory(items);
-        localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(items));
+        const updated = [...inventory, ...items].filter((v, i, a) => a.findIndex(t => t.url === v.url) === i);
+        setInventory(updated);
+        localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(updated));
         alert(`Discovered ${items.length} nodes via sitemap.`);
-    } catch (e) { alert("Sitemap scan failed. Try Firecrawl Map."); }
+    } catch (e) { alert("Sitemap scan failed. Try Firecrawl or Search Grounding."); }
     finally { setIsProcessingInv(false); }
   };
 
@@ -333,8 +371,9 @@ const App = () => {
         return { url, title, type: 'CONTENT' };
       }).filter(item => item.url && item.url.startsWith('http'));
       
-      setInventory(newItems);
-      localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(newItems));
+      const updated = [...inventory, ...newItems].filter((v, i, a) => a.findIndex(t => t.url === v.url) === i);
+      setInventory(updated);
+      localStorage.setItem(SAVED_ARTICLES_KEY, JSON.stringify(updated));
       setIsProcessingInv(false);
       alert(`Imported ${newItems.length} nodes.`);
     };
@@ -476,12 +515,13 @@ const App = () => {
             <h2>2. Target Page Inventory</h2>
             <div className="inventory-grid" style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px'}}>
                 <div className="inv-method">
-                    <label style={{display:'block', marginBottom:'10px', fontWeight:800, fontSize:'0.75rem', color:'var(--text-muted)'}}>URL DISCOVERY</label>
+                    <label style={{display:'block', marginBottom:'10px', fontWeight:800, fontSize:'0.75rem', color:'var(--text-muted)'}}>AI & AUTO DISCOVERY</label>
                     <div className="input-group" style={{flexDirection:'column'}}>
                         <input type="text" className="input" placeholder="Domain or Sitemap URL" value={inventoryUrl} onChange={e => setInventoryUrl(e.target.value)} />
-                        <div style={{display:'flex', gap:'5px', marginTop:'5px'}}>
-                            <button className="btn btn-secondary" style={{flex:1, fontSize:'0.7rem'}} onClick={handleFetchInventory} disabled={isProcessingInv}>Sitemap Scan</button>
-                            <button className="btn btn-firecrawl" style={{flex:1, fontSize:'0.7rem'}} onClick={handleFirecrawlMap} disabled={isProcessingInv || !firecrawlKey}>Firecrawl Map</button>
+                        <div style={{display:'flex', gap:'5px', flexWrap:'wrap', marginTop:'5px'}}>
+                            <button className="btn btn-secondary" style={{flex:1, minWidth:'120px', fontSize:'0.7rem'}} onClick={handleFetchInventory} disabled={isProcessingInv}>Sitemap Scan</button>
+                            <button className="btn btn-firecrawl" style={{flex:1, minWidth:'120px', fontSize:'0.7rem'}} onClick={handleFirecrawlMap} disabled={isProcessingInv || !firecrawlKey}>Firecrawl Map</button>
+                            <button className="btn btn-ai-search" style={{flex:'1 0 100%', marginTop:'5px', fontSize:'0.75rem', background:'var(--accent-color)', color:'white'}} onClick={handleSearchDiscovery} disabled={isProcessingInv}>AI Search Grounding (PAA)</button>
                         </div>
                     </div>
                 </div>
@@ -493,10 +533,16 @@ const App = () => {
                     </div>
                 </div>
             </div>
-            {!firecrawlKey && <div className="hint-text" style={{marginTop:'10px', fontSize:'0.75rem', color:'var(--warning-color)'}}>Add Firecrawl Key in Step 1 for deep site mapping.</div>}
-            <p style={{textAlign:'center', marginTop:'1.5rem', fontSize:'0.85rem', color:'var(--text-muted)'}}>
-                Currently mapping: <strong>{inventory.length}</strong> possible destinations.
-            </p>
+            <div className="inventory-summary" style={{marginTop:'1.5rem', background:'var(--bg-color)', padding:'1rem', borderRadius:'10px', border:'1px solid var(--border-color)'}}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                    <p style={{fontSize:'0.85rem', color:'var(--text-muted)', margin:0}}>
+                        Nodes Mapped: <strong>{inventory.length}</strong>
+                    </p>
+                    {inventory.length > 0 && (
+                        <button className="btn-clear-inventory" onClick={() => { setInventory([]); localStorage.removeItem(SAVED_ARTICLES_KEY); }}>Clear All</button>
+                    )}
+                </div>
+            </div>
           </div>
         )}
 

@@ -87,6 +87,13 @@ body {
 .btn-firecrawl { background: var(--firecrawl-color); color: white; }
 .btn-firecrawl:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(249, 115, 22, 0.3); }
 
+.btn-ai-search { border: none; border-radius: 8px; font-weight: 800; cursor: pointer; transition: all 0.2s; padding: 10px; }
+.btn-ai-search:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.btn-ai-search:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-clear-inventory { background: none; border: 1px solid var(--border-color); color: var(--text-muted); padding: 4px 12px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; }
+.btn-clear-inventory:hover { background: var(--error-color); color: white; border-color: var(--error-color); }
+
 .nexus-card { 
   display: flex; 
   gap: 2rem; 
